@@ -131,11 +131,14 @@ def list_pdos(slave: str, connection: str = "") -> dict[str, Any]:
 @_connection_field
 @_slave_field
 @zelos_sdk.action.text("index", title="Index", description="e.g. 0x1018")
-@zelos_sdk.action.integer("subindex", title="Subindex", default=0, minimum=0, maximum=255)
+@zelos_sdk.action.integer(
+    "subindex", title="Subindex", required=False, default=0, minimum=0, maximum=255
+)
 @zelos_sdk.action.select(
     "data_type",
     title="Data Type",
     choices=["auto", *protocol.SDO_TYPES],
+    required=False,
     default="auto",
     description="How to decode the bytes; auto picks an unsigned integer by length",
 )
@@ -168,7 +171,9 @@ def read_sdo(
 @_connection_field
 @_slave_field
 @zelos_sdk.action.text("index", title="Index", description="e.g. 0x8000")
-@zelos_sdk.action.integer("subindex", title="Subindex", default=0, minimum=0, maximum=255)
+@zelos_sdk.action.integer(
+    "subindex", title="Subindex", required=False, default=0, minimum=0, maximum=255
+)
 @zelos_sdk.action.text(
     "value", title="Value", description="Number (0x.. allowed), true/false, text, or hex bytes"
 )
