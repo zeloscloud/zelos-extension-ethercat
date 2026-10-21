@@ -1,0 +1,105 @@
+{
+  "$comment": "EtherCAT extension configuration schema. See https://docs.zeloscloud.io/sdk/how-to/develop-extensions/#configuration",
+  "type": "object",
+  "title": "EtherCAT Configuration",
+  "description": "Configure EtherCAT segments the agent masters, one per dedicated network interface.",
+  "ui:options": {
+    "autoconfig": "EtherCAT/auto_config"
+  },
+  "properties": {
+    "connections": {
+      "type": "array",
+      "title": "Connections",
+      "description": "EtherCAT segments to master. Click 'Add' to add one, or Auto-configure to scan every network interface for slaves.",
+      "default": [],
+      "items": {
+        "type": "object",
+        "title": "Connection",
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Label this segment appears under in the trace and the `connection` parameter of the actions. Defaults to the interface name.",
+            "default": "",
+            "ui:placeholder": "defaults to the interface"
+          },
+          "interface": {
+            "type": "string",
+            "title": "Interface",
+            "description": "Network interface the segment hangs off (eth1, enp3s0). Dedicated to EtherCAT: no IP traffic. `demo` runs the simulated segment. On Linux the extension needs CAP_NET_RAW and CAP_NET_ADMIN.",
+            "default": "",
+            "ui:placeholder": "eth1",
+            "ui:widget": "action-choices",
+            "ui:options": {
+              "action": "EtherCAT/list_interfaces"
+            }
+          },
+          "cycle_time": {
+            "type": "number",
+            "title": "Cycle Time (ms)",
+            "description": "Process data cycle. 10 ms suits a non-real-time host; shorter cycles raise jitter.",
+            "default": 10,
+            "minimum": 0.1,
+            "maximum": 1000
+          },
+          "enable_outputs": {
+            "type": "boolean",
+            "title": "Enable Outputs",
+            "description": "Allow the write_output action to drive this segment's outputs. Off: every output stays zero and the action refuses. Outputs are never written at start, and return to zero when the extension stops.",
+            "default": false
+          },
+          "restore_outputs_after_recovery": {
+            "type": "boolean",
+            "title": "Restore Outputs After Recovery",
+            "description": "Off (default): a slave that drops out of OP has its outputs zeroed and they stay zero after recovery until written again, following the no-automatic-restart principle. On: the last written outputs are driven again once the slave is back in OP, as PLC masters do. No effect with Enable Outputs off.",
+            "default": false
+          }
+        },
+        "required": [
+          "interface"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "advanced": {
+      "type": "object",
+      "title": "Advanced",
+      "description": "Settings shared by every connection.",
+      "properties": {
+        "prefix": {
+          "type": "string",
+          "title": "Prefix",
+          "description": "Leading trace source every connection publishes under, so events read '<prefix>/<connection>/<slave>/<pdo>'. Clear it to give each connection its own trace source with unprefixed events.",
+          "default": "EtherCAT",
+          "ui:placeholder": "EtherCAT",
+          "ui:emptyValue": ""
+        },
+        "diagnostics_interval": {
+          "type": "number",
+          "title": "Diagnostics Interval (seconds)",
+          "description": "How often the `_master` and per-slave `_state` events are logged, and how often an unchanged PDO is repeated.",
+          "default": 1.0,
+          "minimum": 0.1,
+          "maximum": 60
+        },
+        "log_level": {
+          "type": "string",
+          "title": "Log Level",
+          "description": "Logging verbosity",
+          "enum": [
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR"
+          ],
+          "default": "INFO"
+        }
+      },
+      "additionalProperties": false,
+      "default": {},
+      "ui:options": {
+        "collapsed": true
+      }
+    }
+  }
+}
