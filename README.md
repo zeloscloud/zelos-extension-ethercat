@@ -68,7 +68,7 @@ Applies to every connection.
 | Event | Fields |
 |-------|--------|
 | `<connection>/_master` | `slaves`, `al_state`, `al_state_name`, `wkc`, `expected_wkc`, `wkc_ok`, `wkc_errors`, `lost_frames`, `cycles`, `cycle_time_us`, `jitter_us`, `dc_time_ns` |
-| `<connection>/<slave>/_state` | `al_state`, `al_state_name`, `al_status_code`, `al_status_text`, `lost`, `outputs_cleared`, `reconfigs` |
+| `<connection>/<slave>/_state` | `al_state`, `al_state_name`, `al_status_code`, `al_status_text`, `lost`, `outputs_cleared`, `reconfigs`, `error_acks` |
 | `<connection>/<slave>/<pdo>` | One field per mapped entry, e.g. `2_EL1004/Channel 1` with `Input`, `5_EL3004/AI Standard Channel 1` with `Underrange` ... `Value` |
 
 Slaves are `<position>_<name>` (`2_EL1004`), so two identical terminals stay apart. A PDO is logged when a value changes and once per diagnostics interval, only on cycles whose working counter is complete.

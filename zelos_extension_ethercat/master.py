@@ -72,6 +72,7 @@ STATE_FIELDS = [
     ("lost", DataType.Boolean),
     ("outputs_cleared", DataType.Boolean),
     ("reconfigs", DataType.UInt32),
+    ("error_acks", DataType.UInt32),
 ]
 
 
@@ -123,6 +124,7 @@ class SlaveInfo:
     lost: bool = False
     outputs_cleared: bool = False  # zeroed after a drop-out, nothing written since
     reconfigs: int = 0  # `reconfig` attempts since start
+    error_acks: int = 0  # SAFEOP+ERROR acknowledgements since start
     reconfig_at: float = 0.0  # monotonic of the last attempt; 0 once OP or targeted
     state_event: str = ""
     events: dict[str, pdo_mod.Pdo] = field(default_factory=dict)  # full event name -> PDO
@@ -142,6 +144,7 @@ class SlaveInfo:
             "lost": self.lost,
             "outputs_cleared": self.outputs_cleared,
             "reconfigs": self.reconfigs,
+            "error_acks": self.error_acks,
             "mapping": self.map.source,
             "input_bits": self.map.input_bits,
             "output_bits": self.map.output_bits,
@@ -532,6 +535,7 @@ class Segment:
                         slave.al_status,
                         protocol.al_status_text(slave.al_status),
                     )
+                    info.error_acks += 1
                     slave.state = protocol.SAFEOP + protocol.ERROR_FLAG  # ACK shares the bit
                     slave.write_state()
                 elif state == protocol.SAFEOP:
@@ -677,6 +681,7 @@ class Segment:
                 info.lost,
                 info.outputs_cleared,
                 info.reconfigs,
+                info.error_acks,
             )
             if force or self._last_logged.get(info.state_event) != values:
                 self._last_logged[info.state_event] = values
@@ -691,6 +696,7 @@ class Segment:
                         "lost": info.lost,
                         "outputs_cleared": info.outputs_cleared,
                         "reconfigs": info.reconfigs,
+                        "error_acks": info.error_acks,
                     },
                 )
 
