@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Per-slave PDO events named from the CoE PDO mapping (0x1C1x, 0x16xx/0x1Axx, object dictionary) or the SII PDO categories for slaves without a mailbox; datatypes from the mapping entries.
 - Trace layout `EtherCAT/<connection>/<position>_<slave>/<pdo>`, with `_master` and per-slave `_state` diagnostics events.
 - Actions: `get_status`, `list_slaves`, `list_pdos`, `read_sdo`, `write_sdo`, `browse_od`, `write_output`, `clear_outputs`, `request_state`; config-form hooks `list_interfaces`, `auto_config`.
-- Outputs disabled by default: never written at start, zero on stop; `write_output` needs Enable Outputs on the connection.
+- Outputs disabled by default: never written at start, zero on stop; `write_output` needs Enable Outputs on the connection and refuses a slave held below OP.
 - Recovery of slaves that fall out of OP or drop off the bus, after SOEM's simple_test.
 - `demo`: a simulated EK1100 + EL1004 + 2x EL2004 + EL3004 segment; `scan` and `trace` CLI commands.
 - Bit-sized terminals sharing a byte are decoded and written at their FMMU start bit; one straddling a byte is reported (`input_problem` / `output_problem`), its inputs not logged and its outputs refused.

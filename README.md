@@ -84,9 +84,9 @@ Terminals with fewer than 8 bits (EL1002, EL2004, ...) share bytes; one whose bi
 | `read_sdo` | CoE SDO upload, decoded by size unless a data type is given |
 | `write_sdo` | CoE SDO download with an explicit data type |
 | `browse_od` | The object dictionary, or one object with its entries; pauses process data, so only while the connection is held below OP (`request_state` SAFEOP first) |
-| `write_output` | Set one output (`Channel 1/Output` or `0x7000:01`); needs Enable Outputs |
+| `write_output` | Set one output (`Channel 1/Output` or `0x7000:01`); needs Enable Outputs and the slave in OP |
 | `clear_outputs` | Every output back to zero |
-| `request_state` | Request INIT, PREOP, SAFEOP or OP for every slave or one; below OP the master holds there until OP is requested again |
+| `request_state` | Request INIT, PREOP, SAFEOP or OP for every slave or one; below OP outputs are zeroed and the master holds there, with `write_output` refused, until OP is requested again |
 
 With several connections, pass `connection` to pick one. Slaves are addressed by position, trace name or unique device name.
 

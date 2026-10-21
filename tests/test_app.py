@@ -2,7 +2,6 @@
 the action surface, output arming, and recovery from a dropped slave."""
 
 import asyncio
-import time
 
 import pytest
 import zelos_sdk
@@ -133,24 +132,29 @@ def test_outputs_disabled_refuses_writes_and_a_lost_slave_recovers():
     async def body(stop):
         with pytest.raises(ValueError, match="outputs are disabled"):
             actions.write_output(slave="3", output="Channel 1/Output", value="true")
-        # The EL2004 drops off the bus 1 s from now, for 0.4 s.
+        # The first EL2004 drops off the bus, then comes back.
         sim: SimMaster = segment.master
         zero = bytes(sim.output_bytes)
-        sim._t0 = time.monotonic()
-        sim._fault_period, sim._fault_duration = 1.0, 0.4
+        el2004 = sim.slaves[2]
+        el2004.present, el2004._current = False, protocol.NONE
         await wait_until(lambda: segment.wkc_errors > 0, 3.0)
-        await wait_until(lambda: segment.slaves[2].al_state == protocol.NONE, 3.0)
+        await wait_until(lambda: segment.slaves[2].lost, 3.0)
         assert bytes(sim.io_map[: sim.output_bytes]) == zero
+        el2004.present = True
         await wait_until(
             lambda: segment.slaves[2].al_state == protocol.OP and segment.wkc == 6, 5.0
         )
-        sim._fault_period = 0
         assert actions.list_slaves()["slaves"][2]["lost"] is False
         assert bytes(sim.io_map[: sim.output_bytes]) == zero
         reached = actions.request_state(state="SAFEOP")["reached"]
         assert reached == "SAFEOP"
         await asyncio.sleep(0.3)  # recovery must not push it back to OP while held
         assert segment.al_state == protocol.SAFEOP
+        # A held slave that vanishes is still flagged lost and recovered.
+        el2004.present, el2004._current = False, protocol.NONE
+        await wait_until(lambda: segment.slaves[2].lost, 3.0)
+        el2004.present = True
+        await wait_until(lambda: not segment.slaves[2].lost, 3.0)
         assert actions.request_state(state="OP")["reached"] == "OP"
         assert bytes(sim.io_map[: sim.output_bytes]) == zero
 

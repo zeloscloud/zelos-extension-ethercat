@@ -228,7 +228,8 @@ def browse_od(slave: str, index: str = "", connection: str = "") -> dict[str, An
 @zelos_sdk.action(
     "Write Output",
     "Set one process data output; it drives the terminal from the next cycle until changed, "
-    "cleared or the extension stops. Needs Enable Outputs on the connection",
+    "cleared, held below OP or the extension stops. Needs Enable Outputs on the connection "
+    "and the slave in OP (not held by request_state)",
 )
 @_connection_field
 @_slave_field
@@ -258,7 +259,7 @@ def clear_outputs(connection: str = "") -> dict[str, Any]:
 @zelos_sdk.action(
     "Request State",
     "Request an AL state (INIT, PREOP, SAFEOP, OP) for every slave or one. Below OP the "
-    "master stops driving outputs and holds the state until OP is requested again",
+    "outputs are zeroed, writes refused, and the state held until OP is requested again",
 )
 @_connection_field
 @zelos_sdk.action.select(

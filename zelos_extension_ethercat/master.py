@@ -1,14 +1,9 @@
-"""One EtherCAT segment with the agent as its master: bring-up, cyclic process data,
-diagnostics and recovery, modelled on SOEM's simple_test (OpenEtherCATsociety/SOEM
-test/linux/simple_test). pysoem drives the NIC; `interface` `demo` runs the simulator.
+"""One EtherCAT segment with the agent as master: SOEM's simple_test (main + ecatcheck)
+over pysoem, or the simulator for `demo`.
 
-The cycle runs on its own thread, never on the event loop; actions reach the
-mailbox under `_mbx_lock` while the cycle keeps going.
-
-GIL: pysoem releases it only around process data, SDO and FoE calls. Every other
-SOEM call here (`read_state`, `write_state`, per-slave `state_check`, `reconfig`,
-`recover`, `_fprd`, `eeprom_read`, `od`) holds it, so each is either kept off the
-running cycle, bounded by a short SOEM timeout, or documented where it is not.
+The cycle thread owns every state read and write; actions post state requests to it and
+reach the mailbox under `_mbx_lock`. pysoem releases the GIL only around process data,
+SDO and FoE; every other SOEM call holds it.
 """
 
 from __future__ import annotations
@@ -18,6 +13,8 @@ import contextlib
 import logging
 import threading
 import time
+from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,21 +29,18 @@ logger = logging.getLogger(__name__)
 
 DEMO_INTERFACE = "demo"
 
-#: SOEM timeouts, in us (ethercattype.h).
+#: SOEM timeouts, us (ethercattype.h).
 EC_TIMEOUTRET = 2000
 EC_TIMEOUTSTATE = 2_000_000
 EC_TIMEOUTMON = 500
-#: simple_test waits EC_TIMEOUTSTATE * 4 for SAFEOP and 200 x (one cycle + 50 ms) for OP.
-#: Here both are Python polling loops (one `read_state` per poll, a 2 ms frame timeout),
-#: not SOEM's blocking `state_check`, so the GIL and the stop event stay reachable.
+#: simple_test: EC_TIMEOUTSTATE x 4 for SAFEOP, 200 x (cycle + 50 ms) for OP; polled here.
 SAFEOP_TIMEOUT = 8.0
 OP_TIMEOUT = 10.0
 STATE_POLL = 0.01
-#: While the working counter is short, slaves are checked this often (simple_test: 10 ms;
-#: each check is a broadcast state read plus any recovery, so it stays off the cycle).
+#: Slave check cadence while the working counter is short (simple_test: 10 ms).
 CHECK_INTERVAL = 0.1
-#: Configured station alias register (ETG.1000.4 Table 31).
-REG_STATION_ALIAS = 0x0012
+#: The upward transitions a slave accepts, in order (ETG.1000.6 Table 9).
+_LADDER = (protocol.PREOP, protocol.SAFEOP, protocol.OP)
 
 MASTER_EVENT = "_master"
 STATE_EVENT = "_state"
@@ -75,22 +69,19 @@ STATE_FIELDS = [
 
 
 class SegmentError(Exception):
-    """The segment cannot be brought up or an action cannot run; one line for the user."""
+    """Bring-up or an action failed; one line for the user."""
 
 
 def open_backend(interface: str) -> Any:
-    """A pysoem Master on `interface`, or the simulator for `demo`.
-
-    :raises SegmentError: the interface cannot be opened (missing, or no CAP_NET_RAW)
-    """
+    """A pysoem Master on `interface`, or the simulator for `demo`."""
     if interface == DEMO_INTERFACE:
         from zelos_extension_ethercat.demo.simulator import SimMaster
 
         return SimMaster()
     import pysoem
 
-    # Every SOEM call releases the GIL: a 700 ms SDO read on the actions thread must
-    # not stall the cycle, or the slaves' SM watchdog (100 ms default) trips.
+    # Process data, SDO and FoE calls release the GIL: a long SDO on the actions thread
+    # must not stall the cycle (the slaves' SM watchdog, 100 ms default, would trip).
     pysoem.settings.always_release_gil = True
     master = pysoem.Master()
     try:
@@ -105,7 +96,7 @@ def open_backend(interface: str) -> Any:
 
 @dataclass
 class SlaveInfo:
-    """What the extension knows of one slave: identity, mapping, trace names, last state."""
+    """One slave: identity, mapping, trace names, last state."""
 
     position: int
     name: str
@@ -117,13 +108,9 @@ class SlaveInfo:
     map: SlaveMap = field(default_factory=SlaveMap)
     input_span: FmmuSpan = FmmuSpan()
     output_span: FmmuSpan = FmmuSpan()
-    #: Why a direction is unusable through pysoem's view (inputs not logged, writes
-    #: refused), or "" when it is fine; see `pdo.span_problem`.
-    input_problem: str = ""
-    output_problem: str = ""
-    #: The state this slave alone is held at by `request_state`; below OP the check
-    #: loop leaves it there.
-    requested_state: int = protocol.OP
+    input_problem: str = ""  # why inputs are not logged ("" = fine); `pdo.span_problem`
+    output_problem: str = ""  # why writes are refused
+    requested_state: int = protocol.OP  # below OP the check loop leaves the slave there
     al_state: int = 0
     al_status_code: int = 0
     lost: bool = False
@@ -150,6 +137,25 @@ class SlaveInfo:
             "output_problem": self.output_problem,
             "pdos": [p.event for p in self.map.pdos()],
         }
+
+
+@dataclass
+class StateRequest:
+    """A `request_state`, served by the cycle thread one ladder rung at a time."""
+
+    wanted: int
+    info: SlaveInfo | None  # None: every slave
+    steps: list[int] = field(default_factory=list)
+    deadline: float = 0.0
+    reached: int = protocol.NONE
+    done: threading.Event = field(default_factory=threading.Event)
+
+
+def _needs(state: int, step: int, wanted: int) -> bool:
+    """Whether a slave at `state` is written `step`: below it on the way up; anywhere but
+    at it on the last rung (a downward move is one write)."""
+    current = state & 0x0F
+    return current < step if step < wanted else current != step
 
 
 class Segment:
@@ -194,10 +200,10 @@ class Segment:
         self._staged: dict[int, bytearray] = {}  # position -> output image (pysoem view)
         self._dirty = False
         self._docheck = False
-        #: The state the master holds the segment at; below OP recovery stops pushing to OP.
-        self._requested_state = protocol.OP
+        self._requested_state = protocol.OP  # below OP the check loop stops pushing to OP
+        self._requests: deque[StateRequest] = deque()
+        self._request: StateRequest | None = None
         self._last_logged: dict[str, tuple] = {}
-        self._last_logged_at: dict[str, int] = {}
 
     # ─── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -207,8 +213,7 @@ class Segment:
         :raises SegmentError: bring-up failed (first contact is required)
         """
         self.state = "starting"
-        # Daemon: the app's forced exit past its shutdown bound must not wait on a
-        # SOEM call that holds the GIL (a reconfig, an OD walk).
+        # Daemon: the app's forced exit must not wait on a GIL-holding SOEM call.
         self._thread = threading.Thread(
             target=self._thread_main, name=f"ethercat-{self.name}", daemon=True
         )
@@ -274,8 +279,9 @@ class Segment:
         if not self._wait_state(protocol.SAFEOP, SAFEOP_TIMEOUT):
             raise SegmentError(f"not every slave reached SAFEOP: {self._laggards(protocol.SAFEOP)}")
         self.expected_wkc = self.master.expected_wkc
-        # Outputs start at zero: one valid exchange before OP, as simple_test does.
-        self._zero_outputs()
+        # One zero exchange before OP, as simple_test does.
+        self._stage_zero()
+        self._apply_outputs()
         self.master.send_processdata()
         self.master.receive_processdata(EC_TIMEOUTRET)
         self.master.state = protocol.OP
@@ -292,11 +298,8 @@ class Segment:
         )
 
     def _wait_state(self, wanted: int, timeout: float, exchange: bool = False) -> bool:
-        """Poll until every slave reports `wanted`, the deadline passes, or a stop.
-
-        `exchange`: keep process data flowing meanwhile (slaves leave SAFEOP only with
-        valid outputs). Each poll is one `read_state` (a broadcast, then one read per
-        slave only when they disagree; each frame bounded by EC_TIMEOUTRET).
+        """Poll `read_state` until every slave reports `wanted`, the deadline, or a stop;
+        `exchange` keeps process data flowing (slaves leave SAFEOP only with valid outputs).
 
         :raises SegmentError: stopped while waiting
         """
@@ -315,8 +318,7 @@ class Segment:
             time.sleep(period)
 
     def _check_spans(self, info: SlaveInfo, slave: Any) -> None:
-        """Where the slave's bits sit, from its FMMUs, and whether pysoem's view reaches
-        them; a direction that does not fit is logged once here and then left alone."""
+        """FMMU spans, and whether pysoem's view reaches them; a problem is logged once."""
         info.input_span, info.output_span = pdo_mod.read_fmmus(slave._fprd)
         info.input_problem = pdo_mod.span_problem(
             info.input_span, info.map.input_bits, len(slave.input)
@@ -347,7 +349,7 @@ class Segment:
         info = SlaveInfo(position, slave.name, slave.man, slave.id, slave.rev)
         info.trace_name = pdo_mod.slave_trace_name(position, slave.name, slave.id)
         with contextlib.suppress(Exception):
-            info.alias = int.from_bytes(slave._fprd(REG_STATION_ALIAS, 2), "little")
+            info.alias = int.from_bytes(slave._fprd(protocol.REG_STATION_ALIAS, 2), "little")
         info.map = self._read_map(info, slave)
         pdo_mod.assign_names(info.map)
         logger.info(
@@ -385,11 +387,8 @@ class Segment:
             return SlaveMap()
 
     def _od_lookup(self, info: SlaveInfo, slave: Any) -> pdo_mod.OdLookup | None:
-        """Names and types from the object dictionary, when the slave serves SDO info.
-
-        `slave.od` walks the dictionary over the mailbox holding the GIL; it runs here
-        before the cycle exists, bounded by EC_TIMEOUTRXM (700 ms) per failed exchange.
-        """
+        """Names and types from the OD when the slave serves SDO info. `slave.od` holds the
+        GIL for the walk (EC_TIMEOUTRXM 700 ms per failed exchange); runs before the cycle."""
         try:
             objects = {obj.index: obj for obj in slave.od}
         except Exception as e:
@@ -444,8 +443,7 @@ class Segment:
         timeout_us = max(100, min(EC_TIMEOUTRET, period_ns // 2000))
         next_ns = time.perf_counter_ns()
         last_check = last_diag = last_cycle = next_ns
-        periods: list[int] = []
-        jitter_max = 0
+        period_sum = period_count = jitter_max = 0
         while not self._stop.is_set():
             now = time.perf_counter_ns()
             if now < next_ns:
@@ -453,9 +451,10 @@ class Segment:
                 now = time.perf_counter_ns()
             jitter_max = max(jitter_max, abs(now - next_ns))
             next_ns += period_ns
-            if now > next_ns:  # fell behind by a whole period: resync rather than burst
+            if now > next_ns:  # a whole period late: resync rather than burst
                 next_ns = now + period_ns
-            periods.append(now - last_cycle)
+            period_sum += now - last_cycle
+            period_count += 1
             last_cycle = now
 
             self._apply_outputs()
@@ -475,19 +474,19 @@ class Segment:
             ) and now - last_check >= CHECK_INTERVAL * 1e9:
                 last_check = now
                 self._check_slaves(t_ns)
+            self._serve_request()
             if now - last_diag >= self.diagnostics_interval * 1e9:
                 last_diag = now
-                if periods:
-                    self.cycle_time_us = sum(periods) / len(periods) / 1000
+                self.cycle_time_us = period_sum / period_count / 1000
                 self.jitter_us = jitter_max / 1000
-                periods.clear()
-                jitter_max = 0
+                period_sum = period_count = jitter_max = 0
                 self._diagnostics_tick(t_ns)
 
     def _bring_down(self) -> None:
         """Outputs to zero for one cycle, every slave to INIT, interface closed."""
         with contextlib.suppress(Exception):
-            self._zero_outputs()
+            self._stage_zero()
+            self._apply_outputs()
             self.master.send_processdata()
             self.master.receive_processdata(EC_TIMEOUTRET)
             self.master.state = protocol.INIT
@@ -496,28 +495,16 @@ class Segment:
         logger.info("[%s] stopped", self.name)
 
     def _check_slaves(self, t_ns: int) -> None:
-        """simple_test's ecatcheck: acknowledge errors, re-request OP, reconfigure a slave
-        that fell back, recover one that vanished.
-
-        Runs on the cycle thread at most every CHECK_INTERVAL while the WKC is short,
-        and every call here holds the GIL: `read_state` and `state_check` are bounded
-        by EC_TIMEOUTRET per frame (2 ms), `recover` by a few frames at EC_TIMEOUTMON
-        (500 us). `reconfig` is the exception: SOEM walks INIT -> PREOP -> SAFEOP -> OP
-        with EC_TIMEOUTSTATE (2 s) per step, so a slave that answers but will not
-        progress stalls the cycle up to 8 s; a healthy one takes tens of ms. pysoem has
-        no non-blocking form of it, and the stall is the one simple_test accepts.
-        """
+        """simple_test's ecatcheck. A held slave, or any while a state request is in
+        flight, is only watched for loss. `reconfig` blocks the cycle up to 6 s (SOEM
+        steps INIT -> PREOP -> SAFEOP at EC_TIMEOUTSTATE each); the rest is bounded by
+        EC_TIMEOUTRET or EC_TIMEOUTMON per frame."""
         self.master.read_state()
         docheck = False
-        if self._requested_state != protocol.OP:  # held below OP on request: observe only
-            self._refresh_states()
-            self._log_states(t_ns, force=False)
-            return
         for info, slave in zip(self.slaves, self.master.slaves, strict=True):
             state = slave.state
-            if info.requested_state != protocol.OP:  # this slave alone is held: observe only
-                continue
-            if state != protocol.OP:
+            held = self._request is not None or info.requested_state != protocol.OP
+            if state != protocol.OP and not held:
                 docheck = True
                 if state == protocol.SAFEOP + protocol.ERROR_FLAG:
                     logger.warning(
@@ -533,16 +520,16 @@ class Segment:
                     logger.warning("[%s] %s in SAFEOP; requesting OP", self.name, info.trace_name)
                     slave.state = protocol.OP
                     slave.write_state()
-                elif state > protocol.NONE:
-                    if slave.reconfig(EC_TIMEOUTMON):
-                        slave.is_lost = False
-                        logger.info("[%s] %s reconfigured", self.name, info.trace_name)
-                elif not slave.is_lost:
-                    slave.state_check(protocol.OP, EC_TIMEOUTRET)
-                    if slave.state == protocol.NONE:
-                        slave.is_lost = True
-                        logger.error("[%s] %s lost", self.name, info.trace_name)
+                elif state > protocol.NONE and slave.reconfig(EC_TIMEOUTMON):
+                    slave.is_lost = False
+                    logger.info("[%s] %s reconfigured", self.name, info.trace_name)
+            if state == protocol.NONE and not slave.is_lost:
+                slave.state_check(protocol.OP, EC_TIMEOUTRET)
+                if slave.state == protocol.NONE:
+                    slave.is_lost = True
+                    logger.error("[%s] %s lost", self.name, info.trace_name)
             if slave.is_lost:
+                docheck = True
                 if slave.state == protocol.NONE:
                     if slave.recover(EC_TIMEOUTMON):
                         slave.is_lost = False
@@ -550,11 +537,59 @@ class Segment:
                 else:
                     slave.is_lost = False
                     logger.info("[%s] %s found", self.name, info.trace_name)
-        if self._docheck and not docheck:
+        if self._docheck and not docheck and self._requested_state == protocol.OP:
             logger.info("[%s] all slaves resumed OP", self.name)
         self._docheck = docheck
         self._refresh_states()
         self._log_states(t_ns, force=False)
+
+    def _targets(self, req: StateRequest) -> list[tuple[SlaveInfo, Any]]:
+        if req.info is None:
+            return list(zip(self.slaves, self.master.slaves, strict=True))
+        return [(req.info, self.master.slaves[req.info.position - 1])]
+
+    def _serve_request(self) -> None:
+        """One step of the pending state request: the hold first, then each rung of the
+        ladder written and polled, EC_TIMEOUTSTATE per rung."""
+        req = self._request
+        if req is None:
+            if not self._requests:
+                return
+            req = self._request = self._requests.popleft()
+            if req.info is None:
+                self._requested_state = req.wanted
+            for info, _ in self._targets(req):
+                info.requested_state = req.wanted
+            if req.wanted != protocol.OP:
+                self._stage_zero(None if req.info is None else {req.info.position})
+            self.master.read_state()
+            lowest = min(s.state & 0x0F for _, s in self._targets(req))
+            req.steps = [s for s in _LADDER if lowest < s < req.wanted] + [req.wanted]
+            self._write_step(req)
+            return
+        self.master.read_state()
+        self._refresh_states()
+        step = req.steps[0]
+        if any(_needs(s.state, step, req.wanted) for _, s in self._targets(req)):
+            if time.monotonic() < req.deadline:
+                return
+        elif len(req.steps) > 1:
+            req.steps.pop(0)
+            self._write_step(req)
+            return
+        req.reached = self.master.state if req.info is None else self._targets(req)[0][1].state
+        self._request = None
+        if req.wanted == protocol.OP:
+            self._docheck = True  # the check loop re-requests OP for every slave
+        req.done.set()
+
+    def _write_step(self, req: StateRequest) -> None:
+        step = req.steps[0]
+        for _, slave in self._targets(req):
+            if _needs(slave.state, step, req.wanted):
+                slave.state = step
+                slave.write_state()
+        req.deadline = time.monotonic() + EC_TIMEOUTSTATE / 1e6
 
     def _refresh_states(self) -> None:
         for info, slave in zip(self.slaves, self.master.slaves, strict=True):
@@ -564,6 +599,18 @@ class Segment:
                 slave.is_lost,
             )
         self.al_state = self.master.state
+
+    def _counters(self) -> dict[str, Any]:
+        return {
+            "slaves": len(self.slaves),
+            "wkc": self.wkc,
+            "expected_wkc": self.expected_wkc,
+            "wkc_errors": self.wkc_errors,
+            "lost_frames": self.lost_frames,
+            "cycles": self.cycles,
+            "cycle_time_us": self.cycle_time_us,
+            "jitter_us": self.jitter_us,
+        }
 
     def _diagnostics_tick(self, t_ns: int) -> None:
         """`_master`, every `_state`, and every PDO once; `read_state` holds the GIL for
@@ -575,22 +622,14 @@ class Segment:
             t_ns,
             self._event(MASTER_EVENT),
             {
-                "slaves": len(self.slaves),
+                **self._counters(),
                 "al_state": self.al_state,
                 "al_state_name": protocol.al_state_name(self.al_state),
-                "wkc": self.wkc,
-                "expected_wkc": self.expected_wkc,
                 "wkc_ok": self.wkc >= self.expected_wkc,
-                "wkc_errors": self.wkc_errors,
-                "lost_frames": self.lost_frames,
-                "cycles": self.cycles,
-                "cycle_time_us": self.cycle_time_us,
-                "jitter_us": self.jitter_us,
                 "dc_time_ns": int(self.master.dc_time),
             },
         )
-        # Every PDO at least once per interval, so a static input still plots; not while
-        # the working counter is short, when the image holds stale inputs.
+        # Not while the working counter is short: the image holds stale inputs.
         if self.wkc >= self.expected_wkc:
             self._log_process_data(t_ns, force=True)
 
@@ -638,19 +677,23 @@ class Segment:
 
     # ─── Outputs ─────────────────────────────────────────────────────────────
 
-    def _zero_outputs(self) -> None:
+    def _stage_zero(self, positions: Iterable[int] | None = None) -> int:
+        """Zero the staged outputs of every writable slave (or `positions`) for the next
+        exchange; returns the number of slaves staged in all."""
         with self._out_lock:
-            self._staged = {
-                info.position: bytearray(len(slave.output))
-                for info, slave in zip(self.slaves, self.master.slaves, strict=True)
-                if info.map.outputs and not info.output_problem
-            }
+            for info, slave in zip(self.slaves, self.master.slaves, strict=True):
+                if (
+                    info.map.outputs
+                    and not info.output_problem
+                    and (positions is None or info.position in positions)
+                ):
+                    self._staged[info.position] = bytearray(len(slave.output))
             self._dirty = True
-        self._apply_outputs()
+        return len(self._staged)
 
     def _apply_outputs(self) -> None:
-        """Staged output images into pysoem's views: only this slave's bit span, since
-        bit-sized neighbours share the byte."""
+        """Staged images into pysoem's views, only this slave's bit span: bit-sized
+        neighbours share the byte."""
         if not self._dirty:
             return
         with self._out_lock:
@@ -674,12 +717,7 @@ class Segment:
             "state": self.state,
             "error": self.error,
             "al_state": protocol.al_state_name(self.al_state),
-            "slaves": len(self.slaves),
-            "expected_wkc": self.expected_wkc,
-            "wkc": self.wkc,
-            "wkc_errors": self.wkc_errors,
-            "lost_frames": self.lost_frames,
-            "cycles": self.cycles,
+            **self._counters(),
             "cycle_time_ms": self.cycle_time_ms,
             "cycle_time_us": round(self.cycle_time_us, 1),
             "jitter_us": round(self.jitter_us, 1),
@@ -747,11 +785,8 @@ class Segment:
             slave.sdo_write(index, subindex, data)
 
     def od_browse(self, slave: Any, index: int | None) -> list[dict[str, Any]]:
-        """The object dictionary (SDO info): every object, or one with its entries.
-
-        pysoem's `od` walk holds the GIL for every mailbox exchange, which pauses the
-        cycle for the whole walk; in OP that trips every slave's SM watchdog. So only
-        while the segment is held below OP, where no process data is due.
+        """The object dictionary (SDO info): every object, or one with its entries. The
+        walk holds the GIL for every exchange, so only while held below OP.
 
         :raises RuntimeError: the segment is in OP
         """
@@ -775,23 +810,8 @@ class Segment:
                     "data_type": int(obj.data_type),
                 }
                 if index is not None:
-                    row["entries"] = [
-                        {
-                            "subindex": n,
-                            "name": str(e.name),
-                            "data_type": int(e.data_type),
-                            "bit_length": int(e.bit_length),
-                            "access": int(e.obj_access),
-                        }
-                        for n, e in enumerate(obj.entries)
-                    ] or [
-                        {
-                            "subindex": 0,
-                            "name": str(obj.name),
-                            "data_type": int(obj.data_type),
-                            "bit_length": int(obj.bit_length),
-                            "access": int(obj.obj_access),
-                        }
+                    row["entries"] = [_od_entry(n, e) for n, e in enumerate(obj.entries)] or [
+                        _od_entry(0, obj)
                     ]
                 out.append(row)
             return out
@@ -816,12 +836,16 @@ class Segment:
         )
 
     def write_output(self, info: SlaveInfo, entry: pdo_mod.PdoEntry, text: str) -> object:
-        """Stage one output value; the next cycle carries it. Refused unless enabled, and
-        for a slave whose outputs pysoem's view cannot reach whole."""
+        """Stage one output value; the next cycle carries it. Refused unless enabled, while
+        the segment or the slave is held below OP, and for an unreachable output span."""
         if not self.enable_outputs:
             raise ValueError(
                 f"outputs are disabled on connection '{self.name}'; enable 'Enable Outputs' "
                 "on the connection and restart to drive outputs"
+            )
+        if self._requested_state != protocol.OP or info.requested_state != protocol.OP:
+            raise ValueError(
+                f"{info.trace_name} is held below OP by request_state; request OP first"
             )
         if info.output_problem:
             raise ValueError(
@@ -830,11 +854,11 @@ class Segment:
         value = protocol.coerce(text, entry.kind)
         raw = protocol.encode(value, entry.bit_length, entry.kind)
         with self._out_lock:
-            staged = self._staged.setdefault(
-                info.position, bytearray(len(self.master.slaves[info.position - 1].output))
-            )
             protocol.insert_bits(
-                staged, info.output_span.start_bit + entry.bit_offset, entry.bit_length, raw
+                self._staged[info.position],
+                info.output_span.start_bit + entry.bit_offset,
+                entry.bit_length,
+                raw,
             )
             self._dirty = True
         logger.info("[%s] %s output %s = %r", self.name, info.trace_name, entry.field, value)
@@ -843,51 +867,35 @@ class Segment:
     def clear_outputs(self) -> int:
         """Every output back to zero on the next cycle; the number of slaves with outputs."""
         self._require_running()
-        with self._out_lock:
-            for staged in self._staged.values():
-                staged[:] = bytes(len(staged))
-            self._dirty = True
+        count = self._stage_zero()
         logger.info("[%s] outputs cleared", self.name)
-        return len(self._staged)
+        return count
 
     def request_state(self, state_name: str, info: SlaveInfo | None = None) -> str:
-        """Request an AL state for every slave or one; returns the state reached.
-
-        The wait is a polling loop (per-slave `state_check` or `read_state`, each
-        bounded by EC_TIMEOUTRET per frame) rather than SOEM's `state_check` at
-        EC_TIMEOUTSTATE, which would hold the GIL, and so the cycle, for up to 2 s.
-        """
+        """Hold every slave, or one, at an AL state; the cycle thread serves the request.
+        Returns the state reached."""
         self._require_running()
-        wanted = protocol.REQUESTABLE_STATES[state_name]
-        slave = self.master.slaves[info.position - 1] if info is not None else None
-        target = slave if slave is not None else self.master
-        with self._mbx_lock:
-            if wanted != protocol.OP:
-                self.clear_outputs()
-            target.state = wanted
-            target.write_state()
-            deadline = time.monotonic() + EC_TIMEOUTSTATE / 1e6
-            while True:
-                reached = (
-                    self.master.read_state()
-                    if slave is None
-                    else slave.state_check(wanted, EC_TIMEOUTRET)
-                )
-                if reached == wanted or time.monotonic() >= deadline:
-                    break
-                time.sleep(STATE_POLL)
-        if info is None:
-            self._requested_state = wanted
-            for each in self.slaves:
-                each.requested_state = wanted
-        else:
-            info.requested_state = wanted
-        self._docheck = True  # back to OP: the check loop re-requests it for every slave
+        req = StateRequest(protocol.REQUESTABLE_STATES[state_name], info)
+        self._requests.append(req)
+        deadline = time.monotonic() + len(_LADDER) * EC_TIMEOUTSTATE / 1e6 + 1.0
+        while not req.done.wait(STATE_POLL):
+            if self.state != "running" or time.monotonic() >= deadline:
+                raise RuntimeError(f"connection '{self.name}' is {self.state}; request not served")
         logger.warning(
             "[%s] %s requested for %s; reached %s",
             self.name,
             state_name,
-            "all slaves" if slave is None else "one slave",
-            protocol.al_state_name(reached),
+            "all slaves" if info is None else info.trace_name,
+            protocol.al_state_name(req.reached),
         )
-        return protocol.al_state_name(reached)
+        return protocol.al_state_name(req.reached)
+
+
+def _od_entry(subindex: int, entry: Any) -> dict[str, Any]:
+    return {
+        "subindex": subindex,
+        "name": str(entry.name),
+        "data_type": int(entry.data_type),
+        "bit_length": int(entry.bit_length),
+        "access": int(entry.obj_access),
+    }
