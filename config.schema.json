@@ -47,6 +47,12 @@
             "title": "Enable Outputs",
             "description": "Allow the write_output action to drive this segment's outputs. Off: every output stays zero and the action refuses. Outputs are never written at start, and return to zero when the extension stops.",
             "default": false
+          },
+          "restore_outputs_after_recovery": {
+            "type": "boolean",
+            "title": "Restore Outputs After Recovery",
+            "description": "Off (default): a slave that drops out of OP has its outputs zeroed and they stay zero after recovery until written again, following the no-automatic-restart principle. On: the last written outputs are driven again once the slave is back in OP, as PLC masters do. No effect with Enable Outputs off.",
+            "default": false
           }
         },
         "required": [

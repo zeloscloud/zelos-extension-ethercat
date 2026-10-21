@@ -114,6 +114,28 @@ def test_coe_actions_and_output_arming():
         )
         sim: SimMaster = segment.master
         assert sim.io_map[0] == 0b0001_0010
+
+        async def drop_and_recover(slave):
+            slave.present, slave._current = False, protocol.NONE
+            await wait_until(lambda: segment.slaves[2].lost, 3.0)
+            slave.present = True
+            await wait_until(
+                lambda: segment.slaves[2].al_state == protocol.OP and segment.wkc == 6, 5.0
+            )
+
+        # Default: the dropped EL2004's outputs are cleared, the neighbour's bit 4 kept.
+        await drop_and_recover(sim.slaves[2])
+        await wait_until(lambda: sim.io_map[0] == 0b0001_0000, 2.0)
+        assert actions.list_slaves()["slaves"][2]["outputs_cleared"] is True
+        actions.write_output(slave="3", output="Channel 2/Output", value="true")
+        await wait_until(lambda: sim.io_map[0] == 0b0001_0010, 2.0)
+        assert actions.list_slaves()["slaves"][2]["outputs_cleared"] is False
+        # restore_outputs_after_recovery: the last written outputs are driven again.
+        segment.restore_outputs = True
+        await drop_and_recover(sim.slaves[2])
+        await asyncio.sleep(0.1)
+        assert sim.io_map[0] == 0b0001_0010
+        assert actions.list_slaves()["slaves"][2]["outputs_cleared"] is False
         assert actions.clear_outputs()["slaves"] == 2
         await wait_until(
             lambda: segment._last_logged.get("demo/2_EL1004/Channel 2") == (False,), 2.0

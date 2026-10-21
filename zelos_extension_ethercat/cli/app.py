@@ -41,6 +41,7 @@ CONNECTION_DEFAULTS: dict[str, Any] = {
     "interface": "",
     "cycle_time": 10.0,
     "enable_outputs": False,
+    "restore_outputs_after_recovery": False,
 }
 
 #: The demo's one connection.
@@ -136,6 +137,7 @@ def build_segment(
         source=source,
         event_prefix=event_prefix,
         diagnostics_interval=float(advanced["diagnostics_interval"]),
+        restore_outputs=bool(connection["restore_outputs_after_recovery"]),
     )
 
 

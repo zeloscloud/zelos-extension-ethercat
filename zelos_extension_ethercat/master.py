@@ -65,6 +65,7 @@ STATE_FIELDS = [
     ("al_status_code", DataType.UInt16),
     ("al_status_text", DataType.String),
     ("lost", DataType.Boolean),
+    ("outputs_cleared", DataType.Boolean),
 ]
 
 
@@ -114,6 +115,7 @@ class SlaveInfo:
     al_state: int = 0
     al_status_code: int = 0
     lost: bool = False
+    outputs_cleared: bool = False  # zeroed after a drop-out, nothing written since
     state_event: str = ""
     events: dict[str, pdo_mod.Pdo] = field(default_factory=dict)  # full event name -> PDO
 
@@ -130,6 +132,7 @@ class SlaveInfo:
             "al_status_code": f"0x{self.al_status_code:04x}",
             "al_status_text": protocol.al_status_text(self.al_status_code),
             "lost": self.lost,
+            "outputs_cleared": self.outputs_cleared,
             "mapping": self.map.source,
             "input_bits": self.map.input_bits,
             "output_bits": self.map.output_bits,
@@ -170,11 +173,13 @@ class Segment:
         source: zelos_sdk.TraceSource,
         event_prefix: str | None,
         diagnostics_interval: float = 1.0,
+        restore_outputs: bool = False,
     ) -> None:
         self.name = name
         self.interface = interface
         self.cycle_time_ms = cycle_time_ms
         self.enable_outputs = enable_outputs
+        self.restore_outputs = restore_outputs
         self.source = source
         self.event_prefix = event_prefix
         self.diagnostics_interval = diagnostics_interval
@@ -503,6 +508,8 @@ class Segment:
         docheck = False
         for info, slave in zip(self.slaves, self.master.slaves, strict=True):
             state = slave.state
+            if state != protocol.OP:
+                self._drop_outputs(info)
             held = self._request is not None or info.requested_state != protocol.OP
             if state != protocol.OP and not held:
                 docheck = True
@@ -635,7 +642,7 @@ class Segment:
 
     def _log_states(self, t_ns: int, force: bool) -> None:
         for info in self.slaves:
-            values = (info.al_state, info.al_status_code, info.lost)
+            values = (info.al_state, info.al_status_code, info.lost, info.outputs_cleared)
             if force or self._last_logged.get(info.state_event) != values:
                 self._last_logged[info.state_event] = values
                 self.source.log_at(
@@ -647,6 +654,7 @@ class Segment:
                         "al_status_code": info.al_status_code,
                         "al_status_text": protocol.al_status_text(info.al_status_code),
                         "lost": info.lost,
+                        "outputs_cleared": info.outputs_cleared,
                     },
                 )
 
@@ -690,6 +698,24 @@ class Segment:
                     self._staged[info.position] = bytearray(len(slave.output))
             self._dirty = True
         return len(self._staged)
+
+    def _drop_outputs(self, info: SlaveInfo) -> None:
+        """A slave out of OP loses its staged outputs unless `restore_outputs`: they stay
+        zero after recovery until written again (no automatic restart)."""
+        if self.restore_outputs or not self.enable_outputs:
+            return
+        with self._out_lock:
+            staged = self._staged.get(info.position)
+            if staged is None or not any(staged):
+                return
+            staged[:] = bytes(len(staged))
+            self._dirty = True
+        info.outputs_cleared = True
+        logger.info(
+            "[%s] %s: outputs cleared after drop-out; write again to re-apply",
+            self.name,
+            info.trace_name,
+        )
 
     def _apply_outputs(self) -> None:
         """Staged images into pysoem's views, only this slave's bit span: bit-sized
@@ -861,6 +887,7 @@ class Segment:
                 raw,
             )
             self._dirty = True
+        info.outputs_cleared = False
         logger.info("[%s] %s output %s = %r", self.name, info.trace_name, entry.field, value)
         return value
 
