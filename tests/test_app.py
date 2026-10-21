@@ -190,11 +190,16 @@ def test_outputs_disabled_refuses_writes_and_a_lost_slave_recovers(monkeypatch):
         assert reached == "SAFEOP"
         await asyncio.sleep(0.3)  # recovery must not push it back to OP while held
         assert segment.al_state == protocol.SAFEOP
-        # A held slave that vanishes is still flagged lost and recovered.
+        # A held slave that vanishes is flagged lost, recovered and stepped back to its
+        # held state, never above it.
         el2004.present, el2004._current = False, protocol.NONE
         await wait_until(lambda: segment.slaves[2].lost, 3.0)
         el2004.present = True
         await wait_until(lambda: not segment.slaves[2].lost, 3.0)
+        await wait_until(lambda: segment.slaves[2].al_state == protocol.SAFEOP, 3.0)
+        await asyncio.sleep(0.3)
+        assert segment.slaves[2].al_state == protocol.SAFEOP
+        assert segment.al_state == protocol.SAFEOP
         assert actions.request_state(state="OP")["reached"] == "OP"
         assert bytes(sim.io_map[: sim.output_bytes]) == zero
         # Stuck in PREOP: reconfig once, then observed only until the backoff passes.

@@ -131,6 +131,7 @@ class SlaveInfo:
     reconfigs: int = 0  # `reconfig` attempts since start
     error_acks: int = 0  # SAFEOP+ERROR acknowledgements since start
     reconfig_at: float = 0.0  # monotonic of the last attempt; 0 once OP or targeted
+    stepping: bool = False  # below its held state and being stepped back up to it
     state_event: str = ""
     events: dict[str, pdo_mod.Pdo] = field(default_factory=dict)  # full event name -> PDO
 
@@ -524,8 +525,9 @@ class Segment:
         logger.info("[%s] stopped", self.name)
 
     def _check_slaves(self, t_ns: int) -> None:
-        """simple_test's ecatcheck. A held slave, or any while a state request is in
-        flight, is only watched for loss. `reconfig` blocks the cycle up to 6 s (SOEM
+        """simple_test's ecatcheck. A held slave found below its held state is stepped
+        back up to it, never above (`_step_held`); any slave while a state request is in
+        flight is only watched for loss. `reconfig` blocks the cycle up to 6 s (SOEM
         steps INIT -> PREOP -> SAFEOP at EC_TIMEOUTSTATE each), so one slave gets it at
         most every RECONFIG_BACKOFF and is only observed in between; the rest is bounded
         by EC_TIMEOUTRET or EC_TIMEOUTMON per frame."""
@@ -571,6 +573,13 @@ class Segment:
                         info.reconfigs,
                         RECONFIG_BACKOFF,
                     )
+            elif (
+                self._request is None
+                and state > protocol.NONE
+                and (state & 0x0F) < info.requested_state
+            ):
+                docheck = True
+                self._step_held(info, slave, now)
             if state == protocol.NONE and not slave.is_lost:
                 slave.state_check(protocol.OP, EC_TIMEOUTRET)
                 if slave.state == protocol.NONE:
@@ -591,6 +600,40 @@ class Segment:
         self._refresh_states()
         self._log_states(t_ns, force=False)
 
+    def _step_held(self, info: SlaveInfo, slave: Any, now: float) -> None:
+        """One rung toward a held slave's state and never above it (TwinCAT's Auto
+        Restore States, SOEM's ecatcheck): PREOP, then SAFEOP, written only to this slave,
+        once per pass as the check loop re-requests OP. A refused rung (ERROR flag) is
+        acknowledged and the next written after RECONFIG_BACKOFF."""
+        state = slave.state
+        if state & protocol.ERROR_FLAG:
+            logger.warning(
+                "[%s] %s %s 0x%04x %s; acknowledging, next rung in %.0f s",
+                self.name,
+                info.trace_name,
+                protocol.al_state_name(state),
+                slave.al_status,
+                protocol.al_status_text(slave.al_status),
+                RECONFIG_BACKOFF,
+            )
+            info.error_acks += 1
+            info.reconfig_at = now
+            slave.write_state()  # ACK shares the ERROR bit
+            return
+        if now - info.reconfig_at < RECONFIG_BACKOFF:
+            return
+        if not info.stepping:
+            info.stepping = True
+            logger.warning(
+                "[%s] %s in %s below its held %s; stepping back",
+                self.name,
+                info.trace_name,
+                protocol.al_state_name(state),
+                protocol.al_state_name(info.requested_state),
+            )
+        slave.state = next(s for s in _LADDER if s > (state & 0x0F))
+        slave.write_state()
+
     def _targets(self, req: StateRequest) -> list[tuple[SlaveInfo, Any]]:
         if req.info is None:
             return list(zip(self.slaves, self.master.slaves, strict=True))
@@ -609,6 +652,7 @@ class Segment:
             for info, _ in self._targets(req):
                 info.requested_state = req.wanted
                 info.reconfig_at = 0.0  # a request is a fresh start for the backoff
+                info.stepping = False
             if req.wanted != protocol.OP:
                 self._stage_zero(None if req.info is None else {req.info.position})
             self.master.read_state()
@@ -650,6 +694,14 @@ class Segment:
             if info.reconfig_at and slave.state == protocol.OP:
                 info.reconfig_at = 0.0
                 logger.info("[%s] %s back in OP after reconfig", self.name, info.trace_name)
+            if info.stepping and (slave.state & 0x0F) >= info.requested_state:
+                info.stepping = False
+                logger.info(
+                    "[%s] %s back in its held %s",
+                    self.name,
+                    info.trace_name,
+                    protocol.al_state_name(slave.state),
+                )
         self.al_state = self.master.state
 
     def _counters(self) -> dict[str, Any]:
