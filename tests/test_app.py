@@ -2,6 +2,7 @@
 the action surface, output arming, and recovery from a dropped slave."""
 
 import asyncio
+import time
 
 import pytest
 import zelos_sdk
@@ -145,9 +146,24 @@ def test_coe_actions_and_output_arming():
     asyncio.run(_running(segment, body))
 
 
-def test_outputs_disabled_refuses_writes_and_a_lost_slave_recovers():
+class _Clock:
+    """`time` for master.py with a monotonic that a test can advance."""
+
+    offset = 0.0
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+    def monotonic(self):
+        return time.monotonic() + self.offset
+
+
+def test_outputs_disabled_refuses_writes_and_a_lost_slave_recovers(monkeypatch):
     """Outputs off: writes refused and the output image all zero through a drop-out of
-    the first EL2004 and its recovery; a segment-wide hold below OP is kept."""
+    the first EL2004 and its recovery; a segment-wide hold below OP is kept; a slave
+    that will not leave PREOP gets one reconfig per RECONFIG_BACKOFF."""
+    clock = _Clock()
+    monkeypatch.setattr(master_mod, "time", clock)
     segment, _ = _segment(name="bench", enable_outputs=False)
     actions.set_connections({segment.name: segment})
 
@@ -179,6 +195,26 @@ def test_outputs_disabled_refuses_writes_and_a_lost_slave_recovers():
         await wait_until(lambda: not segment.slaves[2].lost, 3.0)
         assert actions.request_state(state="OP")["reached"] == "OP"
         assert bytes(sim.io_map[: sim.output_bytes]) == zero
+        # Stuck in PREOP: reconfig once, then observed only until the backoff passes.
+        calls = []
+        before = segment.slaves[2].reconfigs
+        real_reconfig = el2004.reconfig
+
+        def reconfig(timeout=500):
+            calls.append(1)
+            return real_reconfig(timeout) if len(calls) > 2 else 0
+
+        el2004.reconfig = reconfig
+        el2004._current = protocol.PREOP
+        await wait_until(lambda: len(calls) == 1, 3.0)
+        await asyncio.sleep(0.3)
+        assert len(calls) == 1 and segment.slaves[2].al_state == protocol.PREOP
+        clock.offset += master_mod.RECONFIG_BACKOFF
+        await wait_until(lambda: len(calls) == 2, 3.0)
+        clock.offset += master_mod.RECONFIG_BACKOFF
+        await wait_until(lambda: segment.slaves[2].al_state == protocol.OP, 3.0)
+        assert len(calls) == 3
+        assert actions.list_slaves()["slaves"][2]["reconfigs"] == before + 3
 
     asyncio.run(_running(segment, body))
 

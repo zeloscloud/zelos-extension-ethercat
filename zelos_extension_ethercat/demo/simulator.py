@@ -448,7 +448,8 @@ class SimMaster:
 
     def receive_processdata(self, timeout: int = 2000) -> int:
         self.dc_time = time.monotonic_ns()
-        present = [s for s in self.slaves if s.present]
+        # Below SAFEOP the process data SMs are off, so the slave does not count.
+        present = [s for s in self.slaves if s.present and s._current >= protocol.SAFEOP]
         return sum((2 if s.output_bits else 0) + (1 if s.input_bits else 0) for s in present)
 
     # simulation

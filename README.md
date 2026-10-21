@@ -10,7 +10,7 @@ A Zelos extension that makes the agent the EtherCAT master of a segment on a ded
 - 📈 **Diagnostics**: working counter expected vs actual, lost frames, cycle time and jitter, per-slave AL state and status code
 - 🧰 **CoE**: SDO read and write, object dictionary browsing where the slave supports SDO info
 - 🛡️ **Outputs off by default**: never written at start, zero on stop, driven only through `write_output` on a connection with Enable Outputs
-- ♻️ **Recovery**: a slave that falls out of OP or drops off the bus is brought back, as SOEM's reference master does; its outputs stay zero until written again unless Restore Outputs After Recovery is on
+- ♻️ **Recovery**: a slave that falls out of OP or drops off the bus is brought back, as SOEM's reference master does; its outputs stay zero until written again unless Restore Outputs After Recovery is on; a slave that will not progress is reconfigured at most every 10 s, since that pauses process data
 - 🏭 **Multiple segments**: one connection per interface
 - 🧪 **Demo mode**: a simulated EK1100 + EL1004 + 2x EL2004 + EL3004 segment, no hardware
 
@@ -68,7 +68,7 @@ Applies to every connection.
 | Event | Fields |
 |-------|--------|
 | `<connection>/_master` | `slaves`, `al_state`, `al_state_name`, `wkc`, `expected_wkc`, `wkc_ok`, `wkc_errors`, `lost_frames`, `cycles`, `cycle_time_us`, `jitter_us`, `dc_time_ns` |
-| `<connection>/<slave>/_state` | `al_state`, `al_state_name`, `al_status_code`, `al_status_text`, `lost`, `outputs_cleared` |
+| `<connection>/<slave>/_state` | `al_state`, `al_state_name`, `al_status_code`, `al_status_text`, `lost`, `outputs_cleared`, `reconfigs` |
 | `<connection>/<slave>/<pdo>` | One field per mapped entry, e.g. `2_EL1004/Channel 1` with `Input`, `5_EL3004/AI Standard Channel 1` with `Underrange` ... `Value` |
 
 Slaves are `<position>_<name>` (`2_EL1004`), so two identical terminals stay apart. A PDO is logged when a value changes and once per diagnostics interval, only on cycles whose working counter is complete.

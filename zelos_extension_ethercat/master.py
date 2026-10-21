@@ -3,7 +3,9 @@ over pysoem, or the simulator for `demo`.
 
 The cycle thread owns every state read and write; actions post state requests to it and
 reach the mailbox under `_mbx_lock`. pysoem releases the GIL only around process data,
-SDO and FoE; every other SOEM call holds it.
+SDO and FoE; every other SOEM call holds it. `reconfig` is the long one (up to 6 s), so
+the check loop tries it at most every RECONFIG_BACKOFF per slave; simple_test runs its
+check on another thread and never stalls its cycle for it.
 """
 
 from __future__ import annotations
@@ -39,6 +41,9 @@ OP_TIMEOUT = 10.0
 STATE_POLL = 0.01
 #: Slave check cadence while the working counter is short (simple_test: 10 ms).
 CHECK_INTERVAL = 0.1
+#: Seconds between `reconfig` attempts on one slave: each pauses process data for the
+#: whole segment while it holds the GIL, and every 100 ms made the pause continuous.
+RECONFIG_BACKOFF = 10.0
 #: The upward transitions a slave accepts, in order (ETG.1000.6 Table 9).
 _LADDER = (protocol.PREOP, protocol.SAFEOP, protocol.OP)
 
@@ -66,6 +71,7 @@ STATE_FIELDS = [
     ("al_status_text", DataType.String),
     ("lost", DataType.Boolean),
     ("outputs_cleared", DataType.Boolean),
+    ("reconfigs", DataType.UInt32),
 ]
 
 
@@ -116,6 +122,8 @@ class SlaveInfo:
     al_status_code: int = 0
     lost: bool = False
     outputs_cleared: bool = False  # zeroed after a drop-out, nothing written since
+    reconfigs: int = 0  # `reconfig` attempts since start
+    reconfig_at: float = 0.0  # monotonic of the last attempt; 0 once OP or targeted
     state_event: str = ""
     events: dict[str, pdo_mod.Pdo] = field(default_factory=dict)  # full event name -> PDO
 
@@ -133,6 +141,7 @@ class SlaveInfo:
             "al_status_text": protocol.al_status_text(self.al_status_code),
             "lost": self.lost,
             "outputs_cleared": self.outputs_cleared,
+            "reconfigs": self.reconfigs,
             "mapping": self.map.source,
             "input_bits": self.map.input_bits,
             "output_bits": self.map.output_bits,
@@ -502,9 +511,11 @@ class Segment:
     def _check_slaves(self, t_ns: int) -> None:
         """simple_test's ecatcheck. A held slave, or any while a state request is in
         flight, is only watched for loss. `reconfig` blocks the cycle up to 6 s (SOEM
-        steps INIT -> PREOP -> SAFEOP at EC_TIMEOUTSTATE each); the rest is bounded by
-        EC_TIMEOUTRET or EC_TIMEOUTMON per frame."""
+        steps INIT -> PREOP -> SAFEOP at EC_TIMEOUTSTATE each), so one slave gets it at
+        most every RECONFIG_BACKOFF and is only observed in between; the rest is bounded
+        by EC_TIMEOUTRET or EC_TIMEOUTMON per frame."""
         self.master.read_state()
+        now = time.monotonic()
         docheck = False
         for info, slave in zip(self.slaves, self.master.slaves, strict=True):
             state = slave.state
@@ -527,9 +538,23 @@ class Segment:
                     logger.warning("[%s] %s in SAFEOP; requesting OP", self.name, info.trace_name)
                     slave.state = protocol.OP
                     slave.write_state()
-                elif state > protocol.NONE and slave.reconfig(EC_TIMEOUTMON):
-                    slave.is_lost = False
-                    logger.info("[%s] %s reconfigured", self.name, info.trace_name)
+                elif state > protocol.NONE and now - info.reconfig_at >= RECONFIG_BACKOFF:
+                    info.reconfig_at = now
+                    info.reconfigs += 1
+                    reached = slave.reconfig(EC_TIMEOUTMON)
+                    if reached:
+                        slave.is_lost = False
+                    logger.warning(
+                        "[%s] %s in %s: reconfig paused process data for %.0f ms, reached %s"
+                        " (attempt %d, next in %.0f s)",
+                        self.name,
+                        info.trace_name,
+                        protocol.al_state_name(state),
+                        (time.monotonic() - now) * 1000,
+                        protocol.al_state_name(reached),
+                        info.reconfigs,
+                        RECONFIG_BACKOFF,
+                    )
             if state == protocol.NONE and not slave.is_lost:
                 slave.state_check(protocol.OP, EC_TIMEOUTRET)
                 if slave.state == protocol.NONE:
@@ -567,6 +592,7 @@ class Segment:
                 self._requested_state = req.wanted
             for info, _ in self._targets(req):
                 info.requested_state = req.wanted
+                info.reconfig_at = 0.0  # a request is a fresh start for the backoff
             if req.wanted != protocol.OP:
                 self._stage_zero(None if req.info is None else {req.info.position})
             self.master.read_state()
@@ -605,6 +631,9 @@ class Segment:
                 slave.al_status,
                 slave.is_lost,
             )
+            if info.reconfig_at and slave.state == protocol.OP:
+                info.reconfig_at = 0.0
+                logger.info("[%s] %s back in OP after reconfig", self.name, info.trace_name)
         self.al_state = self.master.state
 
     def _counters(self) -> dict[str, Any]:
@@ -642,7 +671,13 @@ class Segment:
 
     def _log_states(self, t_ns: int, force: bool) -> None:
         for info in self.slaves:
-            values = (info.al_state, info.al_status_code, info.lost, info.outputs_cleared)
+            values = (
+                info.al_state,
+                info.al_status_code,
+                info.lost,
+                info.outputs_cleared,
+                info.reconfigs,
+            )
             if force or self._last_logged.get(info.state_event) != values:
                 self._last_logged[info.state_event] = values
                 self.source.log_at(
@@ -655,6 +690,7 @@ class Segment:
                         "al_status_text": protocol.al_status_text(info.al_status_code),
                         "lost": info.lost,
                         "outputs_cleared": info.outputs_cleared,
+                        "reconfigs": info.reconfigs,
                     },
                 )
 
