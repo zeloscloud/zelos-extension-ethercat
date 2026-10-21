@@ -1,11 +1,8 @@
-"""Process data mapping: which object sits where in a slave's input and output image,
-and what it is called.
+"""Process data mapping: where each object sits in a slave's image and what it is called.
 
-Two sources, as SOEM's `config_map` decides it (ethercatconfig.c): a slave with a
-CoE mailbox is mapped from its SM PDO assignment objects (0x1C1x -> 0x16xx/0x1Axx
-mapping entries, ETG.1000.6 5.6.7.4), any other from the SII PDO categories of its
-EEPROM (ETG.1000.6 5.4; ETG.2010). Both walks are pure functions over reader
-callables, so the tests run them on synthetic data.
+As SOEM's `config_map` decides it: CoE slaves from the SM PDO assignment objects
+(ETG.1000.6 5.6.7.4), others from the SII PDO categories (ETG.2010). Both walks are
+pure functions over reader callables.
 """
 
 from __future__ import annotations
@@ -30,9 +27,8 @@ SII_CAT_STRINGS, SII_CAT_TXPDO, SII_CAT_RXPDO = 10, 50, 51
 SII_CAT_END = 0xFFFF
 #: Mailbox protocol bits of SII word 0x1C (ETG.1000.6 Table 20).
 MBX_COE = 0x0004
-#: ESC FMMU registers: 16 bytes each from 0x0600 (ETG.1000.4 Table 40), laid out as
-#: SOEM's `ec_fmmut`: LogStart u32, LogLength u16, LogStartbit, LogEndbit, PhysStart u16,
-#: PhysStartBit, FMMUtype, FMMUactive.
+#: ESC FMMU registers, 16 bytes each from 0x0600 (ETG.1000.4 Table 40), as SOEM's `ec_fmmut`:
+#: LogStart u32, LogLength u16, LogStartbit, LogEndbit, PhysStart u16, PhysStartBit, type, active.
 FMMU_REGISTER, FMMU_SIZE, FMMU_COUNT = 0x0600, 16, 4
 FMMU_STRUCT = struct.Struct("<IHBBHBBB")
 FMMU_TYPE_READ, FMMU_TYPE_WRITE = 1, 2
@@ -43,12 +39,12 @@ OdLookup = Callable[[int, int], tuple[str, int] | None]
 
 
 class MapError(Exception):
-    """The mapping of one slave could not be read; the message says why."""
+    """The mapping of one slave could not be read."""
 
 
 @dataclass
 class PdoEntry:
-    """One mapped object: `bit_offset` is within the slave's image of its direction."""
+    """One mapped object; `bit_offset` is within the slave's image of its direction."""
 
     index: int
     subindex: int
@@ -60,8 +56,7 @@ class PdoEntry:
 
     @property
     def is_filler(self) -> bool:
-        """Padding: index 0, which SOEM's slaveinfo also skips."""
-        return self.index == 0
+        return self.index == 0  # padding, skipped as SOEM's slaveinfo does
 
     @property
     def kind(self) -> DataType:
@@ -70,8 +65,7 @@ class PdoEntry:
 
 @dataclass
 class Pdo:
-    """`is_output` comes from the SM type (CoE 0x1C00) or the SII category, as SOEM maps
-    it; the PDO index range (0x16xx / 0x1Axx) is only a convention."""
+    """`is_output` comes from the SM type or the SII category, not the index range."""
 
     index: int
     sync_manager: int
@@ -110,7 +104,7 @@ def _u16(data: bytes) -> int:
 
 
 def _assign_offsets(pdos: list[Pdo]) -> list[Pdo]:
-    """Entries packed back to back in PDO order, as SOEM lays an SM out."""
+    """Entries back to back in PDO order, as SOEM lays an SM out."""
     offset = 0
     for pdo in pdos:
         for entry in pdo.entries:
@@ -123,16 +117,10 @@ def _assign_offsets(pdos: list[Pdo]) -> list[Pdo]:
 
 
 def read_coe_map(sdo_read: SdoRead, od_lookup: OdLookup | None = None) -> SlaveMap:
-    """The mapping a CoE slave reports, SM by SM as SOEM's `ecx_readPDOmap` walks it
-    (ethercatcoe.c): SM2 onwards, with its slave-bug corrections (an SM2 typed 2 shifts
-    every type up by one; an SM2 or SM3 typed 0 is taken as outputs or inputs).
+    """SM2 onwards as SOEM's `ecx_readPDOmap`, with its slave-bug corrections: an SM2 typed
+    2 shifts every type up by one; an SM2 or SM3 typed 0 is outputs or inputs.
 
-    `sdo_read(index, subindex)` returns the object's bytes. Names and types come from
-    `od_lookup` where the slave supports SDO info; otherwise entries are named by
-    index:subindex and typed by width.
-
-    :raises MapError: 0x1C00 cannot be read, or it maps no process data (SOEM then
-        maps from the SII, and so does the caller)
+    :raises MapError: 0x1C00 unreadable, or no process data mapped (the SII is next)
     """
     try:
         sm_count = sdo_read(SM_COMM_TYPE, 0)[0]
@@ -166,7 +154,7 @@ def read_coe_map(sdo_read: SdoRead, od_lookup: OdLookup | None = None) -> SlaveM
 def _read_assignment(
     sdo_read: SdoRead, assign: int, sm: int, is_output: bool, od_lookup: OdLookup | None
 ) -> list[Pdo]:
-    """The PDOs of one SM: 0x1C1x lists the PDO indices, each PDO lists u32 entries
+    """0x1C1x lists the PDO indices; each PDO lists u32 entries
     `index << 16 | subindex << 8 | bit_length` (ETG.1000.6 Table 70)."""
     try:
         count = sdo_read(assign, 0)[0]
@@ -196,17 +184,12 @@ def _read_assignment(
 
 
 class SiiImage:
-    """Byte access to a slave's SII EEPROM through a `fetch(word) -> 4 bytes` reader
-    (pysoem's `eeprom_read`), cached per 2-word read."""
+    """Byte access to the SII through `fetch(word) -> 4 bytes` (pysoem's `eeprom_read`)."""
 
     def __init__(self, fetch: Callable[[int], bytes], max_words: int = 0x2000) -> None:
         self._fetch = fetch
         self._cache: dict[int, bytes] = {}
         self.max_words = max_words
-
-    @classmethod
-    def from_bytes(cls, image: bytes) -> SiiImage:
-        return cls(lambda word: image[2 * word : 2 * word + 4].ljust(4, b"\xff"), len(image) // 2)
 
     def u8(self, byte_addr: int) -> int:
         word = (byte_addr // 4) * 2
@@ -223,7 +206,7 @@ class SiiImage:
         return self.u16(SII_MBX_PROTO_WORD * 2)
 
     def categories(self) -> dict[int, int]:
-        """Category type -> byte address of its data, walked like SOEM's `ecx_siifind`."""
+        """Category type -> byte address of its data, as SOEM's `ecx_siifind`."""
         found: dict[int, int] = {}
         addr = SII_CATEGORY_START_WORD * 2
         while True:
@@ -235,8 +218,7 @@ class SiiImage:
             addr += 4 + 2 * size_words
 
     def strings(self) -> list[str]:
-        """The string category: a count byte, then length-prefixed strings; 1-based
-        indices elsewhere in the SII, so [0] is the empty name."""
+        """The string category, 1-based as the SII indexes it ([0] is the empty name)."""
         start = self.categories().get(SII_CAT_STRINGS)
         if start is None:
             return [""]
@@ -249,9 +231,8 @@ class SiiImage:
 
 
 def read_sii_map(sii: SiiImage) -> SlaveMap:
-    """The mapping of a slave without CoE, from its SII TxPDO (inputs) and RxPDO (outputs)
-    categories: 8-byte PDO headers each followed by 8-byte entries (ETG.2010 Table 19/20).
-    A PDO whose SyncM is 0xFF is not active and does not map."""
+    """TxPDO (inputs) and RxPDO (outputs) categories: 8-byte PDO headers, 8-byte entries
+    (ETG.2010 Table 19/20); SyncM 0xFF means inactive."""
     found = SlaveMap(source="sii")
     strings = sii.strings()
     categories = sii.categories()
@@ -260,8 +241,7 @@ def read_sii_map(sii: SiiImage) -> SlaveMap:
         if start is None:
             continue
         is_output = cat == SII_CAT_RXPDO
-        # The category size is the word before its data.
-        end = start + 2 * sii.u16(start - 2)
+        end = start + 2 * sii.u16(start - 2)  # the category size is the word before its data
         addr = start
         while addr + 8 <= end:
             index, n_entries, sync_manager = sii.u16(addr), sii.u8(addr + 2), sii.u8(addr + 3)
@@ -280,8 +260,7 @@ def read_sii_map(sii: SiiImage) -> SlaveMap:
                 addr += 8
             if sync_manager < 0xFF:
                 target.append(pdo)
-        # SOEM lays an image out SM by SM, PDOs in category order within one.
-        target.sort(key=lambda p: p.sync_manager)
+        target.sort(key=lambda p: p.sync_manager)  # SOEM: SM by SM, category order within
     _assign_offsets(found.outputs)
     _assign_offsets(found.inputs)
     return found
@@ -296,27 +275,19 @@ def _string(strings: list[str], idx: int) -> str:
 
 @dataclass(frozen=True)
 class FmmuSpan:
-    """Where a slave's data of one direction sits in the logical image, from the FMMUs
-    the master programmed: `start_bit` within the first byte (SOEM's Istartbit /
-    Ostartbit) and `bits` covered in all. `bits == 0`: no FMMU of that type."""
+    """A direction's place in the logical image: `start_bit` within the first byte
+    (SOEM's Istartbit / Ostartbit) and `bits` in all; 0 bits: no FMMU read back."""
 
     start_bit: int = 0
     bits: int = 0
 
     def fits(self, view_bytes: int) -> bool:
-        """Whether the whole span lies inside a view of `view_bytes` from the first byte."""
         return self.start_bit + self.bits <= view_bytes * 8
 
 
 def read_fmmus(fprd: Callable[[int, int], bytes]) -> tuple[FmmuSpan, FmmuSpan]:
-    """(inputs, outputs) spans of a slave, read back from its FMMU registers.
-
-    SOEM packs bit-sized slaves (an EL1004's 4 inputs) back to back at the bit level,
-    so the second of two in a row starts at bit 4 of a byte it shares with the first,
-    and a third can straddle into the next byte; pysoem's `slave.input` view is one
-    byte and ignores both. The FMMU says where the bits really are: type 1 reads
-    inputs, 2 writes outputs; LogLength bytes from LogStartbit to LogEndbit.
-    """
+    """(inputs, outputs) from the programmed FMMUs: type 1 reads inputs, 2 writes outputs.
+    SOEM packs bit-sized slaves at the bit level, and pysoem's one-byte view ignores that."""
     inputs = outputs = FmmuSpan()
     for n in range(FMMU_COUNT):
         try:
@@ -337,14 +308,12 @@ def read_fmmus(fprd: Callable[[int, int], bytes]) -> tuple[FmmuSpan, FmmuSpan]:
 
 
 def span_problem(span: FmmuSpan, mapped_bits: int, view_bytes: int) -> str:
-    """Why a direction of a slave cannot be used through pysoem's view, or "".
-
-    The FMMU length is SOEM's own bit count for the slave (Ibits / Obits, rounded up
-    to bytes for byte-oriented slaves): a mapping that disagrees would decode or write
-    the wrong bits. A span past the view (a bit slave straddling a byte) is unreachable.
-    """
-    if not mapped_bits or not span.bits:
+    """Why a mapped direction cannot be used through pysoem's view, or "". Fails closed:
+    without the FMMU, the bits could be a neighbour's."""
+    if not mapped_bits:
         return ""
+    if not span.bits:
+        return "FMMU not read back"
     if not mapped_bits <= span.bits <= (mapped_bits + 7) // 8 * 8:
         return f"mapping says {mapped_bits} bits but the FMMU covers {span.bits}"
     if not span.fits(view_bytes):
@@ -359,18 +328,14 @@ def span_problem(span: FmmuSpan, mapped_bits: int, view_bytes: int) -> str:
 
 
 def slave_trace_name(position: int, name: str, product: int) -> str:
-    """`<position>_<name>`: bus order first, as TwinCAT's `Term n (EL1004)` numbers it,
-    which keeps two identical terminals apart without renaming either."""
+    """`<position>_<name>`, bus order first as TwinCAT's `Term n (EL1004)`."""
     clean = protocol.sanitize(name) or f"0x{product:08X}"
     return f"{position}_{clean}"
 
 
 def assign_names(slave_map: SlaveMap) -> None:
-    """Event names per PDO and field names per entry, unique within their scope.
-
-    A PDO without a name is `rxpdo_1600` / `txpdo_1a00`; a second PDO of a name takes
-    its index as suffix. Entries without a name read `0x6000_01`; fillers get none.
-    """
+    """Event names per PDO (`rxpdo_1600` / `txpdo_1a00` unnamed, index suffix on collision)
+    and field names per entry (`0x6000_01` unnamed, subindex suffix on collision)."""
     events: set[str] = set()
     for pdo in slave_map.pdos():
         base = protocol.sanitize(pdo.name) or (
@@ -388,8 +353,3 @@ def assign_names(slave_map: SlaveMap) -> None:
             )
             entry.field = name if name not in fields else f"{name}_{entry.subindex:02x}"
             fields.add(entry.field)
-
-
-def expected_wkc(outputs_wkc: int, inputs_wkc: int) -> int:
-    """SOEM simple_test: an LRW counts 2 per output FMMU and 1 per input FMMU."""
-    return outputs_wkc * 2 + inputs_wkc

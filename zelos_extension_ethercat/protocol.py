@@ -1,8 +1,5 @@
-"""EtherCAT protocol constants and value codecs: AL states, CoE data types, bit-packed
-process data. Pure Python, no bus; the seam the unit tests cover.
-
-References: ETG.1000.6 (AL state machine, data type index), SOEM ethercattype.h.
-"""
+"""EtherCAT constants and value codecs: AL states, CoE data types, bit-packed process data.
+Pure Python, no bus (ETG.1000.6; SOEM ethercattype.h)."""
 
 from __future__ import annotations
 
@@ -11,10 +8,12 @@ import struct
 import zelos_sdk
 from zelos_sdk import DataType
 
-# AL control / status register values (ETG.1000.6 Table 9; SOEM ec_state).
+#: AL control / status values (ETG.1000.6 Table 9; SOEM ec_state).
 NONE, INIT, PREOP, BOOT, SAFEOP, OP = 0x00, 0x01, 0x02, 0x03, 0x04, 0x08
 #: Bit 4 of the AL status is the error indication; written back it acknowledges it.
 ERROR_FLAG = 0x10
+#: Configured station alias register (ETG.1000.4 Table 31).
+REG_STATION_ALIAS = 0x0012
 
 #: As the TwinCAT online tab spells them.
 AL_STATE_NAMES = {
@@ -25,7 +24,7 @@ AL_STATE_NAMES = {
     SAFEOP: "SAFEOP",
     OP: "OP",
 }
-#: Which states an action may request; BOOT needs a firmware flow this extension lacks.
+#: BOOT needs a firmware flow this extension lacks.
 REQUESTABLE_STATES = {"INIT": INIT, "PREOP": PREOP, "SAFEOP": SAFEOP, "OP": OP}
 
 
@@ -36,7 +35,7 @@ def al_state_name(state: int) -> str:
 
 
 def al_status_text(code: int) -> str:
-    """The ETG.1000.6 Table 15 text of an AL status code (SOEM's table via pysoem)."""
+    """ETG.1000.6 Table 15 text, from SOEM's table."""
     if code == 0:
         return "No error"
     import pysoem  # deferred: the demo and the tests never open a NIC
@@ -44,7 +43,7 @@ def al_status_text(code: int) -> str:
     return pysoem.al_status_code_to_string(code)
 
 
-# CoE data type index (ETG.1000.6 Table 63; CiA 301 7.4.7) -> trace data type.
+#: CoE data type index (ETG.1000.6 Table 63; CiA 301 7.4.7) -> trace data type.
 _COE_TYPES: dict[int, DataType] = {
     0x0001: DataType.Boolean,  # BOOL
     0x0002: DataType.Int8,  # SINT
@@ -84,8 +83,7 @@ _FLOATS = {DataType.Float32: "<f", DataType.Float64: "<d"}
 
 
 def trace_type(coe_type: int, bit_length: int) -> DataType:
-    """The trace type of a PDO entry: its CoE type, else by width (an unknown or unlisted
-    type still traces as the integer of its width)."""
+    """The CoE type's trace type, else the unsigned integer of the width."""
     found = _COE_TYPES.get(coe_type)
     if found is not None:
         return found
@@ -152,8 +150,8 @@ def encode(value: object, bit_length: int, kind: DataType) -> int:
 
 
 def coerce(text: str, kind: DataType) -> object:
-    """A typed value from action text: `true`/`false`/`1`/`0` for bools, `0x..` allowed
-    for integers, hex digits for binary.
+    """A typed value from action text: true/false for bools, `0x..` allowed for integers,
+    hex digits for binary.
 
     :raises ValueError: the text is not a value of `kind`
     """
@@ -174,8 +172,7 @@ def coerce(text: str, kind: DataType) -> object:
     return int(text, 0)
 
 
-#: What the SDO actions accept as `data_type`, and how many bytes each is on the wire
-#: (0 = as long as the text).
+#: `data_type` of the SDO actions -> trace type and wire size (0: as long as the text).
 SDO_TYPES: dict[str, tuple[DataType, int]] = {
     "u8": (DataType.UInt8, 1),
     "u16": (DataType.UInt16, 2),
@@ -189,14 +186,6 @@ SDO_TYPES: dict[str, tuple[DataType, int]] = {
     "f64": (DataType.Float64, 8),
     "string": (DataType.String, 0),
     "hex": (DataType.Binary, 0),
-}
-
-#: `data_type` names by CoE type index, for the `auto` choice of the SDO actions.
-SDO_TYPE_OF_COE: dict[int, str] = {
-    coe: name
-    for name, (kind, _) in reversed(list(SDO_TYPES.items()))
-    for coe, found in _COE_TYPES.items()
-    if found == kind and coe < 0x0030
 }
 
 

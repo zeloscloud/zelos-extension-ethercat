@@ -1,5 +1,6 @@
 """PDO mapping from the SII and from CoE, FMMU spans, and trace naming."""
 
+import pytest
 from zelos_sdk import DataType
 
 from zelos_extension_ethercat import pdo
@@ -20,7 +21,7 @@ def test_sii_map_names_and_offsets():
         (0x1A01, 3, "Channel 2", [(0, 0, "", 0, 4), (0x6001, 0x11, "Value", 0x03, 16)]),
     ]
     image = simulator.build_sii(2, 0x1234, 1, 0, strings, txpdos, [])
-    found = pdo.read_sii_map(pdo.SiiImage.from_bytes(image))
+    found = pdo.read_sii_map(pdo.SiiImage(simulator.SimSlave("x", 0x1234, 1, image).eeprom_read))
     pdo.assign_names(found)
 
     assert found.source == "sii" and not found.outputs
@@ -36,37 +37,31 @@ def test_sii_map_names_and_offsets():
     assert found.input_bits == 44
 
 
-def test_coe_map_walks_sm_assignment_with_od_names():
-    """The simulated EL3004: 0x1C00 types, 0x1C13 assignment, 0x1A0x entries, OD lookups."""
-    slave = simulator._el3004()
-    objects = {o.index: o for o in slave.od}
+def test_coe_map_applies_soem_sm_type_corrections():
+    """An SM2 typed 2 shifts every type up by one (SMt_bug_add); an SM3 typed 0 is inputs;
+    an assignment that maps no bits raises (the SII is next)."""
 
-    def lookup(index, sub):
-        obj = objects.get(index)
-        if obj is None:
-            return None
-        if obj.entries and sub < len(obj.entries):
-            return obj.entries[sub].name, obj.entries[sub].data_type
-        return obj.name, obj.data_type
+    def entry(index, sub, bits):
+        return ((index << 16) | (sub << 8) | bits).to_bytes(4, "little")
 
-    found = pdo.read_coe_map(slave.sdo_read, lookup)
-    pdo.assign_names(found)
-    assert found.source == "coe" and not found.outputs and len(found.inputs) == 4
-    first = found.inputs[0]
-    assert first.event == "AI Standard Channel 1"
-    assert [e.field for e in first.entries if e.field] == [
-        "Underrange",
-        "Overrange",
-        "Limit 1",
-        "Limit 2",
-        "Error",
-        "TxPDO State",
-        "TxPDO Toggle",
-        "Value",
-    ]
-    value = first.entries[-1]
-    assert (value.bit_offset, value.bit_length, value.kind) == (16, 16, DataType.Int16)
-    assert found.inputs[3].entries[-1].bit_offset == 3 * 32 + 16
+    values = {
+        (0x1C00, 0): b"\x04",
+        (0x1C00, 3): b"\x02",
+        (0x1C00, 4): b"\x00",
+        (0x1C12, 0): b"\x01",
+        (0x1C12, 1): b"\x00\x16",
+        (0x1600, 0): b"\x01",
+        (0x1600, 1): entry(0x7000, 1, 8),
+        (0x1C13, 0): b"\x01",
+        (0x1C13, 1): b"\x00\x1a",
+        (0x1A00, 0): b"\x01",
+        (0x1A00, 1): entry(0x6000, 1, 16),
+    }
+    found = pdo.read_coe_map(lambda index, sub: values[(index, sub)])
+    assert [(p.index, p.is_output) for p in found.pdos()] == [(0x1600, True), (0x1A00, False)]
+    assert (found.output_bits, found.input_bits) == (8, 16)
+    with pytest.raises(pdo.MapError, match="no process data"):
+        pdo.read_coe_map(lambda index, sub: b"\x00")
 
 
 def test_fmmu_spans_read_the_programmed_fmmus():
@@ -92,6 +87,8 @@ def test_fmmu_spans_read_the_programmed_fmmus():
     assert pdo.span_problem(inputs, 4, 1) == ""
     assert "straddle" in pdo.span_problem(pdo.FmmuSpan(6, 4), 4, 1)
     assert "FMMU covers" in pdo.span_problem(outputs, 20, 3)
+    assert "not read back" in pdo.span_problem(pdo.FmmuSpan(), 4, 1)  # fails closed
+    assert pdo.span_problem(pdo.FmmuSpan(), 0, 0) == ""
 
 
 def test_naming_is_position_first_and_collision_free():
@@ -115,4 +112,3 @@ def test_naming_is_position_first_and_collision_free():
     pdo.assign_names(found)
     assert [p.event for p in found.pdos()] == ["Outputs", "Outputs_1a00", "txpdo_1a01"]
     assert [e.field for e in found.outputs[0].entries] == ["0x7000_01", "0x7000_02"]
-    assert pdo.expected_wkc(outputs_wkc=1, inputs_wkc=2) == 4

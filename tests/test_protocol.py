@@ -1,19 +1,9 @@
-"""Value codecs and AL state decoding: the pure seam under process data and the SDO actions."""
+"""Value codecs: the pure seam under process data and the SDO actions."""
 
 import pytest
 from zelos_sdk import DataType
 
 from zelos_extension_ethercat import protocol
-
-
-def test_al_state_names_and_status_text():
-    assert protocol.al_state_name(0x08) == "OP"
-    assert protocol.al_state_name(0x14) == "SAFEOP+ERROR"
-    assert protocol.al_state_name(0x00) == "NONE"
-    assert protocol.al_status_text(0) == "No error"
-    # ETG.1000.6 Table 15, via SOEM's table.
-    assert protocol.al_status_text(0x001B) == "Sync manager watchdog"
-    assert protocol.al_status_text(0x0011) == "Invalid requested state change"
 
 
 def test_trace_type_from_coe_type_then_width():
@@ -40,21 +30,12 @@ def test_decode_and_encode_bit_packed_round_trip():
         protocol.encode(-129, 8, DataType.Int8)
 
 
-def test_coerce_action_text():
-    assert protocol.coerce("true", DataType.Boolean) is True
-    assert protocol.coerce("0", DataType.Boolean) is False
+def test_coerce_and_sdo_codec_edges():
+    """What the app path does not exercise: hex integers, hex bytes, signed SDO payloads,
+    a size mismatch, and a non-boolean."""
     assert protocol.coerce("0x10", DataType.UInt16) == 16
     assert protocol.coerce("de ad", DataType.Binary) == b"\xde\xad"
     with pytest.raises(ValueError):
         protocol.coerce("maybe", DataType.Boolean)
-
-
-def test_sdo_codec():
-    assert protocol.encode_sdo("0x1234", "u16") == b"\x34\x12"
     assert protocol.encode_sdo("-2", "i8") == b"\xfe"
-    assert protocol.encode_sdo("EL3004", "string") == b"EL3004"
-    assert protocol.decode_sdo(b"\x34\x12", "u16") == 0x1234
-    assert protocol.decode_sdo(b"EL3004", "string") == "EL3004"
     assert protocol.decode_sdo(b"\x01\x02\x03", "u16") == "010203"  # size mismatch: hex
-    assert protocol.SDO_TYPE_OF_COE[0x0007] == "u32"
-    assert protocol.SDO_TYPE_OF_COE[0x0009] == "string"
