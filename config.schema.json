@@ -45,7 +45,7 @@
           "enable_outputs": {
             "type": "boolean",
             "title": "Enable Outputs",
-            "description": "Allow the write_output action to drive this segment's outputs. Off: every output stays zero and the action refuses. Outputs are never written at start, and return to zero when the extension stops.",
+            "description": "Allow the write_output and write_sdo actions to change this segment. Off: every output stays zero and both actions refuse. Outputs are never written at start, and return to zero when the extension stops.",
             "default": false
           },
           "restore_outputs_after_recovery": {

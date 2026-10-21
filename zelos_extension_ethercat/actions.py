@@ -166,7 +166,8 @@ def read_sdo(
 
 @zelos_sdk.action(
     "Write SDO",
-    "Write a CoE object (SDO download). Changes device parameters: check the manual first",
+    "Write a CoE object (SDO download). Changes device parameters and can command drives: "
+    "check the manual first. Needs Enable Outputs on the connection",
 )
 @_connection_field
 @_slave_field

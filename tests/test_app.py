@@ -126,9 +126,11 @@ def test_coe_actions_and_output_arming():
                 lambda: segment.slaves[2].al_state == protocol.OP and segment.wkc == 6, 5.0
             )
 
-        # Default: the dropped EL2004's outputs are cleared, the neighbour's bit 4 kept.
+        # Default: the dropped EL2004's outputs are cleared, the neighbour's bit 4 kept;
+        # the power cycle reset its watchdog, so it is programmed again.
         await drop_and_recover(sim.slaves[2])
         await wait_until(lambda: sim.io_map[0] == 0b0001_0000, 2.0)
+        assert sim.slaves[2].watchdog_ms == 500.0
         assert actions.list_slaves()["slaves"][2]["outputs_cleared"] is True
         actions.write_output(slave="3", output="Channel 2/Output", value="true")
         await wait_until(lambda: sim.io_map[0] == 0b0001_0010, 2.0)
@@ -172,6 +174,8 @@ def test_outputs_disabled_refuses_writes_and_a_lost_slave_recovers(monkeypatch):
     async def body(stop):
         with pytest.raises(ValueError, match="outputs are disabled"):
             actions.write_output(slave="3", output="Channel 1/Output", value="true")
+        with pytest.raises(ValueError, match="SDO writes are disabled"):
+            actions.write_sdo(slave="5", index="0x8000", subindex=6, value="0", data_type="u8")
         # The first EL2004 drops off the bus, then comes back.
         sim: SimMaster = segment.master
         zero = bytes(sim.output_bytes)
@@ -222,6 +226,59 @@ def test_outputs_disabled_refuses_writes_and_a_lost_slave_recovers(monkeypatch):
         await wait_until(lambda: segment.slaves[2].al_state == protocol.OP, 3.0)
         assert len(calls) == 3
         assert actions.list_slaves()["slaves"][2]["reconfigs"] == before + 3
+
+    asyncio.run(_running(segment, body))
+
+
+def test_expected_wkc_counts_bit_slaves_and_follows_states(monkeypatch):
+    """EL1004 + EL2004: each counts (1 + 2) though SOEM counts neither (pysoem's 0); a
+    slave left in SAFEOP with a full WKC is still brought back to OP; a SAFEOP hold
+    expects inputs only and keeps logging."""
+    layout = ("EK1100", "EL1004", "EL2004")
+    monkeypatch.setattr(master_mod, "open_backend", lambda interface: SimMaster(layout=layout))
+    segment, _ = _segment(name="wkc")
+    actions.set_connections({segment.name: segment})
+
+    async def body(stop):
+        sim: SimMaster = segment.master
+        assert (segment.expected_wkc, sim.expected_wkc, segment.wkc) == (3, 0, 3)
+        sim.slaves[2]._current = protocol.SAFEOP  # ESC-only: still counts its outputs
+        await wait_until(lambda: sim.slaves[2]._current == protocol.OP, 2.0)
+        assert actions.request_state(state="SAFEOP")["reached"] == "SAFEOP"
+        await wait_until(lambda: segment.expected_wkc == 1, 1.0)
+        errors, logged = segment.wkc_errors, segment._last_logged.get("wkc/2_EL1004/Channel 3")
+        await wait_until(lambda: segment._last_logged.get("wkc/2_EL1004/Channel 3") != logged, 2.0)
+        assert segment.wkc_errors == errors
+
+    asyncio.run(_running(segment, body))
+
+
+def test_a_stalled_cycle_drops_outputs_before_the_next_send():
+    """A cycle stall past the output watchdog: the ESC-only EL2004 trips but stays in OP,
+    so the next send would drive its old outputs again; they go out as zero instead."""
+    segment, _ = _segment(name="stall")
+    actions.set_connections({segment.name: segment})
+
+    async def body(stop):
+        sim: SimMaster = segment.master
+        actions.write_output(slave="3", output="Channel 1/Output", value="true")
+        await wait_until(lambda: sim.io_map[0] & 1, 2.0)
+        sent, receive, send = [], sim.receive_processdata, sim.send_processdata
+
+        def stalled(timeout=2000):
+            sim.receive_processdata = receive
+            time.sleep(master_mod.OUTPUT_WATCHDOG_MS / 1000 + 0.1)
+            return receive(timeout)
+
+        def recorded():
+            sent.append(sim.io_map[0])
+            return send()
+
+        sim.receive_processdata, sim.send_processdata = stalled, recorded
+        await wait_until(lambda: len(sent) > 5, 3.0)
+        assert not any(b & 1 for b in sent[1:])
+        assert sim.slaves[2].wd_trips == 1 and sim.slaves[2]._current == protocol.OP
+        assert actions.list_slaves()["slaves"][2]["outputs_cleared"] is True
 
     asyncio.run(_running(segment, body))
 
