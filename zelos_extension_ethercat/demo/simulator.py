@@ -4,8 +4,7 @@ and the tests run the real bring-up, mapping, cycle and recovery code with no NI
 The segment is the bench the extension is meant for: an EK1100 coupler, an EL1004
 (4 DI, SII mapped, wired back from the first EL2004's first two channels), two EL2004
 (4 DO each, SII mapped, packed into one byte as SOEM does) and an EL3004 (4 AI, CoE
-mapped with an object dictionary). Optionally the first EL2004 drops off the bus now
-and then, which exercises recovery.
+mapped with an object dictionary). A test drops a slave by clearing its `present`.
 
 Process data lives in one `io_map` laid out as SOEM's `ecx_config_map_group` does it,
 so a slave's `input` / `output` view is the same byte window pysoem hands out.
@@ -41,7 +40,6 @@ from zelos_extension_ethercat.pdo import (
 BECKHOFF = 0x00000002
 #: CoE type indices used below.
 BOOL, SINT, INT, UDINT, VISIBLE_STRING, BIT1, BIT2 = 0x01, 0x02, 0x03, 0x07, 0x09, 0x30, 0x31
-REG_STATION_ALIAS = 0x0012
 
 
 # ─── SII image builder ──────────────────────────────────────────────────────
@@ -166,7 +164,7 @@ class SimSlave:
     def _fprd(self, address: int, size: int, timeout_us: int = 2000) -> bytes:
         if not self.present:
             raise RuntimeError("no answer")
-        if address == REG_STATION_ALIAS:
+        if address == protocol.REG_STATION_ALIAS:
             return self._alias.to_bytes(2, "little")[:size]
         if FMMU_REGISTER <= address < FMMU_REGISTER + 4 * FMMU_SIZE:
             n = (address - FMMU_REGISTER) // FMMU_SIZE
@@ -219,10 +217,6 @@ class SimSlave:
         return 1
 
     # process data: pysoem's views are Ibytes/Obytes wide, one byte for a bit slave
-    @property
-    def _mapped(self) -> bool:
-        return bool(self._fmmus)
-
     def _view(self, offset: int, bits: int) -> bytes:
         return bytes(self._io_map[offset : offset + max(1, bits // 8)]) if bits else b""
 
@@ -238,15 +232,9 @@ class SimSlave:
     def output(self, value: bytes) -> None:
         self._io_map[self._out_off : self._out_off + len(value)] = value  # memcpy, as pysoem
 
-    def _set_input(self, data: bytes) -> None:
+    def _set_input(self, raw: int) -> None:
         """Simulation only: the slave's own input bits into the shared image."""
-        for n in range(self.input_bits):
-            protocol.insert_bits(
-                self._io_map,
-                self._in_off * 8 + self._in_start + n,
-                1,
-                (data[n // 8] >> (n % 8)) & 1,
-            )
+        protocol.insert_bits(self._io_map, self._in_off * 8 + self._in_start, self.input_bits, raw)
 
     _in_start = 0
 
@@ -369,19 +357,9 @@ def make_slave(model: str) -> SimSlave:
 
 
 class SimMaster:
-    """The pysoem `Master` surface, over the simulated segment.
+    """The pysoem `Master` surface over the simulated segment; `layout`: models in bus order."""
 
-    `layout`: slave models in bus order (default DEMO_LAYOUT). `fault_period`: seconds
-    between drop-outs of the first EL2004 (0: never), each `fault_duration` long, for
-    the recovery path.
-    """
-
-    def __init__(
-        self,
-        fault_period: float = 0.0,
-        fault_duration: float = 2.0,
-        layout: tuple[str, ...] = DEMO_LAYOUT,
-    ) -> None:
+    def __init__(self, layout: tuple[str, ...] = DEMO_LAYOUT) -> None:
         self.slaves: list[SimSlave] = []
         self.state = protocol.INIT
         self.expected_wkc = 0
@@ -391,7 +369,6 @@ class SimMaster:
         self._layout = layout
         self._t0 = time.monotonic()
         self._rng = random.Random(1)
-        self._fault_period, self._fault_duration = fault_period, fault_duration
         self._open = False
 
     def open(self, interface: str) -> None:
@@ -465,11 +442,7 @@ class SimMaster:
             s.write_state()
         return len(self.slaves)
 
-    def state_check(self, expected: int, timeout: int = 50000) -> int:
-        return self.read_state()
-
     def send_processdata(self) -> int:
-        self._apply_fault()
         self._simulate()
         return 1
 
@@ -485,18 +458,6 @@ class SimMaster:
     def _first(self, model: str) -> SimSlave | None:
         return next((s for s in self.slaves if s.name == model), None)
 
-    def _apply_fault(self) -> None:
-        el2004 = self._first("EL2004")
-        if not self._fault_period or el2004 is None:
-            return
-        phase = self._elapsed() % self._fault_period
-        faulted = phase < self._fault_duration and self._elapsed() > self._fault_period
-        if faulted and el2004.present:
-            el2004.present = False
-            el2004._current = protocol.NONE
-        elif not faulted and not el2004.present:
-            el2004.present = True
-
     def _simulate(self) -> None:
         """Every digital input terminal: channels 1-2 follow the first EL2004's channels
         1-2, the rest free-run; the EL3004 sine, triangle, noise, constant."""
@@ -511,8 +472,8 @@ class SimMaster:
         )
         bits = outputs | (int(t % 1.0 < 0.5) << 2) | (int(t % 5.0 < 2.5) << 3)
         for s in self.slaves:
-            if s.input_bits and s.input_bits <= 8 and s._mapped:
-                s._set_input(bytes([bits & ((1 << s.input_bits) - 1)]))
+            if s.input_bits and s.input_bits <= 8 and s._fmmus:
+                s._set_input(bits & ((1 << s.input_bits) - 1))
         el3004 = self._first("EL3004")
         if el3004 is None:
             return
