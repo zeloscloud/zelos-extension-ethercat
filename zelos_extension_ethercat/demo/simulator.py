@@ -158,6 +158,9 @@ class SimSlave:
         self._in_off = self._out_off = 0
 
     # identity and mapping sources
+    def set_watchdog(self, wd_type: str, wd_time_ms: float) -> None:
+        self.watchdog_ms = wd_time_ms
+
     def eeprom_read(self, word: int, timeout: int = 20000) -> bytes:
         return self._sii[2 * word : 2 * word + 4].ljust(4, b"\xff")
 

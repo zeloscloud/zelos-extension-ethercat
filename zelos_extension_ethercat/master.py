@@ -15,6 +15,7 @@ import contextlib
 import logging
 import threading
 import time
+import warnings
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -44,6 +45,10 @@ CHECK_INTERVAL = 0.1
 #: Seconds between `reconfig` attempts on one slave: each pauses process data for the
 #: whole segment while it holds the GIL, and every 100 ms made the pause continuous.
 RECONFIG_BACKOFF = 10.0
+#: Process data watchdog programmed into output slaves (TwinCAT sets 100 ms on an RT
+#: kernel; 500 ms leaves room for Python pauses on small CPUs while still dropping
+#: outputs within half a second of the master dying).
+OUTPUT_WATCHDOG_MS = 500.0
 #: The upward transitions a slave accepts, in order (ETG.1000.6 Table 9).
 _LADDER = (protocol.PREOP, protocol.SAFEOP, protocol.OP)
 
@@ -347,6 +352,13 @@ class Segment:
             logger.warning(
                 "[%s] %s: inputs not logged: %s", self.name, info.trace_name, info.input_problem
             )
+        if self.enable_outputs and info.map.output_bits and not info.output_problem:
+            try:
+                with warnings.catch_warnings():  # resolution notice from pysoem
+                    warnings.simplefilter("ignore")
+                    slave.set_watchdog("processdata", OUTPUT_WATCHDOG_MS)
+            except Exception as e:  # noqa: BLE001
+                info.output_problem = f"process data watchdog not set: {e}"
         if info.output_problem:
             logger.warning(
                 "[%s] %s: outputs refused: %s", self.name, info.trace_name, info.output_problem

@@ -115,6 +115,8 @@ def test_coe_actions_and_output_arming():
         )
         sim: SimMaster = segment.master
         assert sim.io_map[0] == 0b0001_0010
+        # Output slaves get the process data watchdog; input-only slaves are left alone.
+        assert [getattr(sl, "watchdog_ms", None) for sl in sim.slaves[1:4]] == [None, 500.0, 500.0]
 
         async def drop_and_recover(slave):
             slave.present, slave._current = False, protocol.NONE
