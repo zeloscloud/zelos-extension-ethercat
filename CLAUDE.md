@@ -23,7 +23,7 @@ just package      # zelos extensions package .
 | `zelos_extension_ethercat/master.py` | `Segment`: one connection; bring-up, cycle thread, diagnostics, recovery, action methods |
 | `zelos_extension_ethercat/pdo.py` | PDO mapping from CoE (`read_coe_map`) and SII (`SiiImage`, `read_sii_map`), FMMU start bits, naming |
 | `zelos_extension_ethercat/protocol.py` | AL states and status text, CoE type -> trace type, bit-packed decode/encode, action text coercion, SDO codec |
-| `zelos_extension_ethercat/autoconfig.py` | NIC list and child-process slave scan for `list_interfaces` / `auto_config` |
+| `zelos_extension_ethercat/autoconfig.py` | NIC list for `list_interfaces` / `auto_config`; child-process slave scan for `scan_interface` / `main.py scan` |
 | `zelos_extension_ethercat/constants.py` | `trace_layout` (the one trace-naming rule), `name_error`, reserved names |
 | `zelos_extension_ethercat/cli/app.py` | Config load, `connections[]` / `advanced` resolution, `init_sdk`, `run_until_stopped` |
 | `zelos_extension_ethercat/demo/simulator.py` | `SimMaster` / `SimSlave`: pysoem's surface over a simulated segment; `build_sii` |
@@ -68,7 +68,8 @@ just package      # zelos extensions package .
 
 - Free functions in `actions.py`, bound via `set_connections`. Optional `connection`: `ValueError` listing names when omitted with several; `get_status` covers all. Slaves by position, trace name or unique device name (`Segment.find_slave`).
 - Failure convention: **raise**. Input errors `ValueError`; not running `RuntimeError`; unknown mailbox errors become `RuntimeError` after `logger.exception` (`_run`).
-- Standalone + hidden: `list_interfaces` (the schema's `action-choices` for Interface) and `auto_config` (the schema's `ui:options.autoconfig`; child-process scan per NIC, 5 s each; demo when nothing answers). Standalone actions also run in the live process: `auto_config` reads `_connections` and never scans an interface a running segment owns (`config_init` broadcasts INIT), reporting it as in use; it is not `read_only`. Keep the schema in step.
+- Standalone + hidden + `read_only`: `list_interfaces` (the schema's `action-choices` for Interface) and `auto_config` (the schema's `ui:options.autoconfig`; interface list in the message, form connections kept, demo when empty). `auto_config` never scans: `config_init` broadcasts INIT and drops a segment another master runs out of OP, so only a named interface is scanned (TwinCAT, SOEM slaveinfo, IgH convention). Keep the schema in step.
+- `scan_interface` (standalone, not `read_only`): child-process scan of one named NIC, 5 s deadline; refuses an interface a running connection owns (standalone actions also run in the live process).
 - `browse_od` raises in OP (the OD walk pauses process data): `request_state SAFEOP` first.
 
 ### Simulator

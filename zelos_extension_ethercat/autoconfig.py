@@ -1,10 +1,10 @@
-"""Find EtherCAT segments for the config form: the NICs this machine has, and which
-of them answer a slave scan.
+"""The NICs this machine has, for the config form, and a slave scan of one named NIC.
 
 A scan opens a raw socket and runs SOEM `config_init`, which needs CAP_NET_RAW and
-broadcasts INIT to every slave on the NIC: never on an interface one of this
-extension's connections runs. It runs in a child process killed at a deadline, as the
-CAN extension scans gs_usb: a stuck pcap open must not sit in the live extension.
+broadcasts INIT to every slave on the NIC, dropping a segment another master runs there
+out of OP: only on an interface the user names, never on one of this extension's
+connections. It runs in a child process killed at a deadline, as the CAN extension
+scans gs_usb: a stuck pcap open must not sit in the live extension.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any
 #: Hard deadline on one interface's scan.
 SCAN_SECONDS = 5.0
 _SYS_CLASS_NET = Path("/sys/class/net")
-#: Never worth scanning: no link partner can be an EtherCAT slave.
+#: Never an EtherCAT NIC: no link partner can be a slave.
 _SKIP_PREFIXES = (
     "lo",
     "docker",
@@ -96,60 +96,21 @@ def scan(interface: str, timeout: float = SCAN_SECONDS) -> list[dict[str, Any]]:
     return json.loads(out)
 
 
-def probe(form: list[dict[str, Any]], in_use: dict[str, str] | None = None) -> dict[str, Any]:
-    """The auto-configure result: one connection per NIC with slaves, keeping a form entry
-    for that interface as entered; the demo when nothing answers.
-
-    `in_use`: interface -> connection name of the segments running in this process;
-    those are kept as the form has them and not scanned (the scan would reset them).
-    """
-    in_use = in_use or {}
-    candidates = interfaces()
-    found: list[dict[str, Any]] = []
-    notes: list[str] = []
-    for iface in candidates:
-        if iface["name"] in in_use:
-            notes.append(f"{iface['name']}: in use by connection '{in_use[iface['name']]}', kept")
-            continue
-        try:
-            slaves = scan(iface["name"])
-        except RuntimeError as e:
-            notes.append(f"{iface['name']}: {e}")
-            continue
-        if slaves:
-            found.append({"interface": iface["name"], "slaves": slaves})
-    by_interface = {c.get("interface"): c for c in form if isinstance(c, dict)}
-    connections = [
-        by_interface.get(f["interface"]) or {"name": f["interface"], "interface": f["interface"]}
-        for f in found
-    ] + [
-        by_interface.get(iface) or {"name": name, "interface": iface}
-        for iface, name in in_use.items()
-    ]
-    if not connections:
-        message = (
-            "No EtherCAT slaves answered on "
-            + (", ".join(c["name"] for c in candidates) if candidates else "any interface")
-            + ", so a demo connection was added. Connect the segment to a dedicated NIC; "
-            "on Linux the extension needs CAP_NET_RAW and CAP_NET_ADMIN."
-        )
-        if notes:
-            message += " " + "; ".join(notes) + "."
-        return {
-            "status": "success",
-            "config": {"connections": [{"name": "demo", "interface": "demo"}]},
-            "message": message,
-        }
-    summary = "; ".join(
-        f"{f['interface']}: " + ", ".join(s["name"] or s["product_code"] for s in f["slaves"])
-        for f in found
+def propose(form: list[dict[str, Any]]) -> dict[str, Any]:
+    """The auto-configure result, from the interface list alone: the form's connections
+    as entered, or the demo when it has none. Never scans: a scan resets whatever segment
+    hangs off the NIC, so only an interface the user names is scanned."""
+    found = interfaces()
+    listed = ", ".join(f"{i['name']} ({i['detail']})" if i["detail"] else i["name"] for i in found)
+    message = (
+        f"Interfaces: {listed or 'none found'}. Set a connection's Interface to the NIC the "
+        "segment hangs off; Scan Interface lists the slaves on one. On Linux the extension "
+        "needs CAP_NET_RAW and CAP_NET_ADMIN."
     )
-    return {
-        "status": "success",
-        "config": {"connections": connections},
-        "message": f"Found {summary}. Outputs stay disabled until enabled per connection."
-        + (" " + "; ".join(notes) + "." if notes else ""),
-    }
+    if not form:
+        form = [{"name": "demo", "interface": "demo"}]
+        message = "Added a demo connection. " + message
+    return {"status": "success", "config": {"connections": form}, "message": message}
 
 
 def _scan_main() -> None:

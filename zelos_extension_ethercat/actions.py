@@ -303,13 +303,11 @@ def list_interfaces() -> dict[str, Any]:
 
 @zelos_sdk.action(
     "Auto-configure",
-    "Scan every network interface for EtherCAT slaves and propose one connection per "
-    "interface that answers, keeping an entry the form already has for it. An interface "
-    "a running connection owns is kept, not scanned. Nothing found: a demo connection. "
-    "Review, then save and start.",
+    "List the network interfaces in the result message; keep the form's connections, or "
+    "add a demo connection when it has none. Never scans: pick the segment's interface, "
+    "then Scan Interface lists its slaves. Review, then save and start.",
     standalone=True,
-    # Not read_only: the scan's config_init broadcasts INIT to whatever hangs off the
-    # NIC, so a segment another master runs there drops out of OP.
+    read_only=True,
     hidden=True,
 )
 @zelos_sdk.action.object(
@@ -320,15 +318,41 @@ def list_interfaces() -> dict[str, Any]:
     required=False,
 )
 def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    from zelos_extension_ethercat.autoconfig import probe
+    from zelos_extension_ethercat.autoconfig import propose
 
     if config is None:
         config = _saved_config()
-    # Running in the live extension, the scan must not reset its own segments.
-    in_use = {
-        c.interface: c.name for c in _connections.values() if c.state in ("starting", "running")
-    }
-    return probe([c for c in config.get("connections") or [] if isinstance(c, dict)], in_use)
+    return propose([c for c in config.get("connections") or [] if isinstance(c, dict)])
+
+
+@zelos_sdk.action(
+    "Scan Interface",
+    "The slaves on one network interface (position, name, vendor, product, revision). "
+    "Brings every slave on the NIC to INIT: a segment another master runs there drops out "
+    "of OP. Refuses an interface a running connection owns.",
+    standalone=True,
+    # Not read_only: config_init broadcasts INIT to whatever hangs off the NIC.
+)
+@zelos_sdk.action.text("interface", title="Interface", description="Network interface, e.g. eth1")
+def scan_interface(interface: str) -> dict[str, Any]:
+    from zelos_extension_ethercat.autoconfig import scan
+
+    interface = interface.strip()
+    owner = next(
+        (
+            c.name
+            for c in _connections.values()
+            if c.interface == interface and c.state in ("starting", "running")
+        ),
+        None,
+    )
+    if owner is not None:
+        raise RuntimeError(f"{interface} is in use by connection '{owner}'; list_slaves reads it")
+    try:
+        slaves = scan(interface)
+    except RuntimeError as e:
+        raise RuntimeError(f"scan of {interface} failed: {e}") from e
+    return {"interface": interface, "slaves": slaves, "count": len(slaves)}
 
 
 def _saved_config() -> dict[str, Any]:

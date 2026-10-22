@@ -10,7 +10,7 @@
     "connections": {
       "type": "array",
       "title": "Connections",
-      "description": "EtherCAT segments to master. Click 'Add' to add one, or Auto-configure to scan every network interface for slaves.",
+      "description": "EtherCAT segments to master. Click 'Add' to add one. Auto-configure lists the network interfaces; it never scans one.",
       "default": [],
       "items": {
         "type": "object",

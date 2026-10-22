@@ -332,3 +332,19 @@ def test_resolve_connections_names_and_rejects_duplicates(caplog):
             {"connections": [{"interface": "eth1"}, {"name": "x", "interface": "eth1"}]}
         )
     assert "one master per interface" in caplog.text
+
+
+def test_auto_config_lists_interfaces_and_never_scans(monkeypatch):
+    from zelos_extension_ethercat import autoconfig
+
+    def no_scan(*args, **kwargs):
+        raise AssertionError("auto_config must not scan")
+
+    monkeypatch.setattr(autoconfig, "interfaces", lambda: [{"name": "eth1", "detail": "up, igb"}])
+    monkeypatch.setattr(autoconfig, "scan", no_scan)
+    monkeypatch.setattr(autoconfig.subprocess, "Popen", no_scan)
+    empty = actions.auto_config({})
+    assert empty["config"]["connections"] == [{"name": "demo", "interface": "demo"}]
+    assert "eth1 (up, igb)" in empty["message"]
+    kept = [{"name": "line", "interface": "eth2"}]
+    assert actions.auto_config({"connections": kept})["config"]["connections"] == kept
