@@ -139,6 +139,8 @@ For help and support:
 
 MIT License - see [LICENSE](LICENSE) for details.
 
+EtherCAT® is registered trademark and patented technology, licensed by Beckhoff Automation GmbH & Co. KG, Germany.
+
 ---
 
 **Built with [Zelos](https://zeloscloud.io)**
