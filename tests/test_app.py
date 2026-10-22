@@ -332,6 +332,9 @@ def test_resolve_connections_names_and_rejects_duplicates(caplog):
             {"connections": [{"interface": "eth1"}, {"name": "x", "interface": "eth1"}]}
         )
     assert "one master per interface" in caplog.text
+    with pytest.raises(SystemExit):
+        app.resolve_connections({"connections": [{"interface": "eth1", "cycle_time": 150}]})
+    assert "outside 0.1..100" in caplog.text
 
 
 def test_auto_config_lists_interfaces_and_never_scans(monkeypatch):

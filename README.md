@@ -49,7 +49,7 @@ The interface must be dedicated to EtherCAT: no IP address, no other traffic. Wi
 |---------|---------|-------------|
 | Name | interface | Trace name; unique |
 | Interface | | Network interface of the segment (`eth1`); `demo` runs the simulator |
-| Cycle Time (ms) | 10 | Process data period |
+| Cycle Time (ms) | 10 | Process data period, 0.1 to 100 |
 | Enable Outputs | off | Allow `write_output` and `write_sdo`; off keeps every output at zero and refuses both |
 | Restore Outputs After Recovery | off | Off: a slave that drops out of OP has its outputs zeroed and they stay zero after recovery until written again (no automatic restart). On: the last written outputs are driven again once it is back in OP, as PLC masters do |
 

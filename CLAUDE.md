@@ -55,7 +55,7 @@ just package      # zelos extensions package .
 
 ### Config
 
-- `connections[]`: `name` (defaults to the interface), `interface`, `cycle_time` ms, `enable_outputs`, `restore_outputs_after_recovery`; one master per interface. `advanced`: `prefix`, `diagnostics_interval`, `log_level`. `resolve_advanced` merges over `ADVANCED_DEFAULTS`; an absent `prefix` is the default, an empty one clears it.
+- `connections[]`: `name` (defaults to the interface), `interface`, `cycle_time` ms (0.1..100: 5 cycles inside `OUTPUT_WATCHDOG_MS`), `enable_outputs`, `restore_outputs_after_recovery`; one master per interface. `advanced`: `prefix`, `diagnostics_interval`, `log_level`. `resolve_advanced` merges over `ADVANCED_DEFAULTS`; an absent `prefix` is the default, an empty one clears it.
 - Prefix and connection names go through `name_error`; duplicate names or interfaces are hard errors.
 - `demo` replaces the connections with one `demo` connection on the simulator, outputs enabled; `trace` builds a one-entry config through the same path.
 

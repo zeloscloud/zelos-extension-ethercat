@@ -37,10 +37,10 @@
           "cycle_time": {
             "type": "number",
             "title": "Cycle Time (ms)",
-            "description": "Process data cycle. 10 ms suits a non-real-time host; shorter cycles raise jitter.",
+            "description": "Process data cycle, 0.1 to 100 ms. 10 ms suits a non-real-time host; shorter cycles raise jitter. The cap keeps 5 cycles inside the 500 ms output watchdog.",
             "default": 10,
             "minimum": 0.1,
-            "maximum": 1000
+            "maximum": 100
           },
           "enable_outputs": {
             "type": "boolean",
