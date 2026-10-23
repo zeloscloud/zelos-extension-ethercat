@@ -337,17 +337,21 @@ def test_resolve_connections_names_and_rejects_duplicates(caplog):
     assert "outside 0.1..100" in caplog.text
 
 
-def test_auto_config_lists_interfaces_and_never_scans(monkeypatch):
+def test_auto_config_scans_only_form_interfaces(monkeypatch):
     from zelos_extension_ethercat import autoconfig
 
-    def no_scan(*args, **kwargs):
-        raise AssertionError("auto_config must not scan")
+    scanned = []
+
+    def scan(interface):
+        scanned.append(interface)
+        return [{"name": "EK1100"}, {"name": "EL1004"}]
 
     monkeypatch.setattr(autoconfig, "interfaces", lambda: [{"name": "eth1", "detail": "up, igb"}])
-    monkeypatch.setattr(autoconfig, "scan", no_scan)
-    monkeypatch.setattr(autoconfig.subprocess, "Popen", no_scan)
+    monkeypatch.setattr(autoconfig, "scan", scan)
     empty = actions.auto_config({})
     assert empty["config"]["connections"] == [{"name": "demo", "interface": "demo"}]
-    assert "eth1 (up, igb)" in empty["message"]
-    kept = [{"name": "line", "interface": "eth2"}]
-    assert actions.auto_config({"connections": kept})["config"]["connections"] == kept
+    assert "eth1 (up, igb)" in empty["message"] and not scanned
+    form = [{"name": "line", "interface": "eth2"}, {"interface": "demo"}, {"interface": ""}]
+    result = actions.auto_config({"connections": form})
+    assert scanned == ["eth2"] and result["config"]["connections"] == form
+    assert result["message"].startswith("eth2: 2 slaves (EK1100, EL1004).")

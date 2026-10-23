@@ -1,10 +1,11 @@
-"""The NICs this machine has, for the config form, and a slave scan of one named NIC.
+"""The NICs this machine has, for the config form, and a slave scan of named NICs.
 
 A scan opens a raw socket and runs SOEM `config_init`, which needs CAP_NET_RAW and
 broadcasts INIT to every slave on the NIC, dropping a segment another master runs there
-out of OP: only on an interface the user names, never on one of this extension's
-connections. It runs in a child process killed at a deadline, as the CAN extension
-scans gs_usb: a stuck pcap open must not sit in the live extension.
+out of OP: only on an interface the user names (the form's, or the CLI's), never on one
+of this extension's running connections. It runs in a child process killed at a
+deadline, as the CAN extension scans gs_usb: a stuck pcap open must not sit in the live
+extension.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import contextlib
 import json
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -96,21 +98,63 @@ def scan(interface: str, timeout: float = SCAN_SECONDS) -> list[dict[str, Any]]:
     return json.loads(out)
 
 
-def propose(form: list[dict[str, Any]]) -> dict[str, Any]:
-    """The auto-configure result, from the interface list alone: the form's connections
-    as entered, or the demo when it has none. Never scans: a scan resets whatever segment
-    hangs off the NIC, so only an interface the user names is scanned."""
+def propose(form: list[dict[str, Any]], owners: dict[str, str]) -> dict[str, Any]:
+    """The auto-configure result: each interface the form names scanned (`owners`, an
+    interface a running connection holds, skipped), the connections kept as entered; the
+    demo when the form has none. Only named interfaces: a scan resets whatever segment
+    hangs off the NIC."""
+    from zelos_extension_ethercat.master import DEMO_INTERFACE
+
+    if not form:
+        return {
+            "status": "success",
+            "config": {"connections": [{"name": "demo", "interface": DEMO_INTERFACE}]},
+            "message": f"Added a demo connection. {_interfaces_note()}",
+        }
+    named = [str(c.get("interface") or "").strip() for c in form]
+    chosen = list(dict.fromkeys(i for i in named if i and i != DEMO_INTERFACE and i not in owners))
+    held = list(dict.fromkeys(i for i in named if i in owners))
+    unset = "" in named
+    if not chosen and not held:
+        return {"status": "success", "config": {"connections": form}, "message": _interfaces_note()}
+    # In parallel: each scan may take its full deadline, inside the action's 30 s.
+    with ThreadPoolExecutor(max(len(chosen), 1)) as pool:
+        results = dict(zip(chosen, pool.map(_try_scan, chosen), strict=True))
+    found = [(i, r) for i, r in results.items() if isinstance(r, list) and r]
+    lines = [
+        f"{i}: {len(r)} slave{'s' * (len(r) > 1)} ({', '.join(s['name'] for s in r)})"
+        for i, r in found
+    ]
+    lines += [f"{i}: no slaves" for i, r in results.items() if r == []]
+    lines += [f"{i}: scan failed: {r}" for i, r in results.items() if isinstance(r, str)]
+    lines += [f"{i}: in use by connection '{owners[i]}', not scanned" for i in held]
+    message = "; ".join(lines) + "."
+    if unset:
+        message += " Choose an Interface for each connection without one."
+    if found:
+        message += (
+            " Scanned slaves stay in INIT until a master starts. Review, then save and start."
+        )
+        return {"status": "success", "config": {"connections": form}, "message": message}
+    return {"status": "error", "message": message}
+
+
+def _try_scan(interface: str) -> list[dict[str, Any]] | str:
+    """`scan`, its failure as the one-line reason."""
+    try:
+        return scan(interface)
+    except RuntimeError as e:
+        return str(e)
+
+
+def _interfaces_note() -> str:
     found = interfaces()
     listed = ", ".join(f"{i['name']} ({i['detail']})" if i["detail"] else i["name"] for i in found)
-    message = (
-        f"Interfaces: {listed or 'none found'}. Set a connection's Interface to the NIC the "
-        "segment hangs off; Scan Interface lists the slaves on one. On Linux the extension "
-        "needs CAP_NET_RAW and CAP_NET_ADMIN."
+    return (
+        f"Interfaces: {listed or 'none found'}. Pick the one the segment hangs off in a "
+        "connection's Interface dropdown, then Auto-configure lists its slaves. On Linux the "
+        "extension needs CAP_NET_RAW and CAP_NET_ADMIN."
     )
-    if not form:
-        form = [{"name": "demo", "interface": "demo"}]
-        message = "Added a demo connection. " + message
-    return {"status": "success", "config": {"connections": form}, "message": message}
 
 
 def _scan_main() -> None:

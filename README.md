@@ -23,7 +23,7 @@ zelos extensions install zeloscloud/zelos-extension-ethercat
 In the app:
 
 1. **Install** the extension from the Zelos App
-2. **Configure** a connection: pick the interface the segment hangs off (Auto-configure lists them; nothing is scanned until you name an interface)
+2. **Configure** a connection: pick the interface the segment hangs off from the Interface dropdown, then press Auto-configure to list the slaves on it (the scan brings them to INIT, so a segment another master runs there drops out of OP)
 3. **Start** the extension
 4. **View** data in your Zelos App: `EtherCAT/<connection>/<position>_<slave>/<pdo>`
 
@@ -88,7 +88,6 @@ Terminals with fewer than 8 bits (EL1002, EL2004, ...) share bytes; one whose bi
 | `write_output` | Set one output (`Channel 1/Output` or `0x7000:01`); needs Enable Outputs and the slave in OP |
 | `clear_outputs` | Every output back to zero |
 | `request_state` | Request INIT, PREOP, SAFEOP or OP for every slave or one; below OP outputs are zeroed and the master holds there, with `write_output` refused, until OP is requested again |
-| `scan_interface` | The slaves on one named interface; brings them to INIT, so a segment another master runs there drops out of OP. Refuses an interface a running connection owns |
 
 With several connections, pass `connection` to pick one. Slaves are addressed by position, trace name or unique device name.
 
