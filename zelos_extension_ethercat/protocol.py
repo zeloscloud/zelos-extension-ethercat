@@ -63,9 +63,9 @@ _COE_TYPES: dict[int, DataType] = {
     0x0014: DataType.Int64,  # INT56
     0x0015: DataType.Int64,  # LINT
     0x0016: DataType.UInt32,  # UINT24
-    0x0017: DataType.UInt64,  # UINT40
-    0x0018: DataType.UInt64,  # UINT48
-    0x0019: DataType.UInt64,  # UINT56
+    0x0018: DataType.UInt64,  # UINT40 (0x0017 is reserved)
+    0x0019: DataType.UInt64,  # UINT48
+    0x001A: DataType.UInt64,  # UINT56
     0x001B: DataType.UInt64,  # ULINT
     0x001E: DataType.UInt8,  # BYTE
     0x001F: DataType.UInt16,  # WORD

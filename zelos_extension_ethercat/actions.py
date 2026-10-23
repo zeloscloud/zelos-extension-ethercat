@@ -166,7 +166,8 @@ def read_sdo(
 
 @zelos_sdk.action(
     "Write SDO",
-    "Write a CoE object (SDO download). Changes device parameters: check the manual first",
+    "Write a CoE object (SDO download). Changes device parameters and can command drives: "
+    "check the manual first. Needs Enable Outputs on the connection",
 )
 @_connection_field
 @_slave_field
@@ -302,13 +303,13 @@ def list_interfaces() -> dict[str, Any]:
 
 @zelos_sdk.action(
     "Auto-configure",
-    "Scan every network interface for EtherCAT slaves and propose one connection per "
-    "interface that answers, keeping an entry the form already has for it. An interface "
-    "a running connection owns is kept, not scanned. Nothing found: a demo connection. "
-    "Review, then save and start.",
+    "Scan each interface the form's connections name (unsaved edits included) and report "
+    "the slaves on it; the connections are kept as entered, a demo connection added when "
+    "there is none. A scan brings every slave on the interface to INIT: a segment another "
+    "master runs there drops out of OP. An interface a running connection owns is not "
+    "scanned. Review, then save and start.",
     standalone=True,
-    # Not read_only: the scan's config_init broadcasts INIT to whatever hangs off the
-    # NIC, so a segment another master runs there drops out of OP.
+    # Not read_only: config_init broadcasts INIT to whatever hangs off a scanned NIC.
     hidden=True,
 )
 @zelos_sdk.action.object(
@@ -319,15 +320,15 @@ def list_interfaces() -> dict[str, Any]:
     required=False,
 )
 def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
-    from zelos_extension_ethercat.autoconfig import probe
+    from zelos_extension_ethercat.autoconfig import propose
 
     if config is None:
         config = _saved_config()
-    # Running in the live extension, the scan must not reset its own segments.
-    in_use = {
+    # Standalone actions also run in the live process: never scan under a running master.
+    owners = {
         c.interface: c.name for c in _connections.values() if c.state in ("starting", "running")
     }
-    return probe([c for c in config.get("connections") or [] if isinstance(c, dict)], in_use)
+    return propose([c for c in config.get("connections") or [] if isinstance(c, dict)], owners)
 
 
 def _saved_config() -> dict[str, Any]:

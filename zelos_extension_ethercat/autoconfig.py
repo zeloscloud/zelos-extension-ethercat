@@ -1,10 +1,11 @@
-"""Find EtherCAT segments for the config form: the NICs this machine has, and which
-of them answer a slave scan.
+"""The NICs this machine has, for the config form, and a slave scan of named NICs.
 
 A scan opens a raw socket and runs SOEM `config_init`, which needs CAP_NET_RAW and
-broadcasts INIT to every slave on the NIC: never on an interface one of this
-extension's connections runs. It runs in a child process killed at a deadline, as the
-CAN extension scans gs_usb: a stuck pcap open must not sit in the live extension.
+broadcasts INIT to every slave on the NIC, dropping a segment another master runs there
+out of OP: only on an interface the user names (the form's, or the CLI's), never on one
+of this extension's running connections. It runs in a child process killed at a
+deadline, as the CAN extension scans gs_usb: a stuck pcap open must not sit in the live
+extension.
 """
 
 from __future__ import annotations
@@ -13,13 +14,14 @@ import contextlib
 import json
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 #: Hard deadline on one interface's scan.
 SCAN_SECONDS = 5.0
 _SYS_CLASS_NET = Path("/sys/class/net")
-#: Never worth scanning: no link partner can be an EtherCAT slave.
+#: Never an EtherCAT NIC: no link partner can be a slave.
 _SKIP_PREFIXES = (
     "lo",
     "docker",
@@ -96,60 +98,63 @@ def scan(interface: str, timeout: float = SCAN_SECONDS) -> list[dict[str, Any]]:
     return json.loads(out)
 
 
-def probe(form: list[dict[str, Any]], in_use: dict[str, str] | None = None) -> dict[str, Any]:
-    """The auto-configure result: one connection per NIC with slaves, keeping a form entry
-    for that interface as entered; the demo when nothing answers.
+def propose(form: list[dict[str, Any]], owners: dict[str, str]) -> dict[str, Any]:
+    """The auto-configure result: each interface the form names scanned (`owners`, an
+    interface a running connection holds, skipped), the connections kept as entered; the
+    demo when the form has none. Only named interfaces: a scan resets whatever segment
+    hangs off the NIC."""
+    from zelos_extension_ethercat.master import DEMO_INTERFACE
 
-    `in_use`: interface -> connection name of the segments running in this process;
-    those are kept as the form has them and not scanned (the scan would reset them).
-    """
-    in_use = in_use or {}
-    candidates = interfaces()
-    found: list[dict[str, Any]] = []
-    notes: list[str] = []
-    for iface in candidates:
-        if iface["name"] in in_use:
-            notes.append(f"{iface['name']}: in use by connection '{in_use[iface['name']]}', kept")
-            continue
-        try:
-            slaves = scan(iface["name"])
-        except RuntimeError as e:
-            notes.append(f"{iface['name']}: {e}")
-            continue
-        if slaves:
-            found.append({"interface": iface["name"], "slaves": slaves})
-    by_interface = {c.get("interface"): c for c in form if isinstance(c, dict)}
-    connections = [
-        by_interface.get(f["interface"]) or {"name": f["interface"], "interface": f["interface"]}
-        for f in found
-    ] + [
-        by_interface.get(iface) or {"name": name, "interface": iface}
-        for iface, name in in_use.items()
-    ]
-    if not connections:
-        message = (
-            "No EtherCAT slaves answered on "
-            + (", ".join(c["name"] for c in candidates) if candidates else "any interface")
-            + ", so a demo connection was added. Connect the segment to a dedicated NIC; "
-            "on Linux the extension needs CAP_NET_RAW and CAP_NET_ADMIN."
-        )
-        if notes:
-            message += " " + "; ".join(notes) + "."
+    if not form:
         return {
             "status": "success",
-            "config": {"connections": [{"name": "demo", "interface": "demo"}]},
-            "message": message,
+            "config": {"connections": [{"name": "demo", "interface": DEMO_INTERFACE}]},
+            "message": f"Added a demo connection. {_interfaces_note()}",
         }
-    summary = "; ".join(
-        f"{f['interface']}: " + ", ".join(s["name"] or s["product_code"] for s in f["slaves"])
-        for f in found
+    named = [str(c.get("interface") or "").strip() for c in form]
+    chosen = list(dict.fromkeys(i for i in named if i and i != DEMO_INTERFACE and i not in owners))
+    held = list(dict.fromkeys(i for i in named if i in owners))
+    unset = "" in named
+    if not chosen and not held:
+        return {"status": "success", "config": {"connections": form}, "message": _interfaces_note()}
+    # In parallel: each scan may take its full deadline, inside the action's 30 s.
+    with ThreadPoolExecutor(max(len(chosen), 1)) as pool:
+        results = dict(zip(chosen, pool.map(_try_scan, chosen), strict=True))
+    found = [(i, r) for i, r in results.items() if isinstance(r, list) and r]
+    lines = [
+        f"{i}: {len(r)} slave{'s' * (len(r) > 1)} ({', '.join(s['name'] for s in r)})"
+        for i, r in found
+    ]
+    lines += [f"{i}: no slaves" for i, r in results.items() if r == []]
+    lines += [f"{i}: scan failed: {r}" for i, r in results.items() if isinstance(r, str)]
+    lines += [f"{i}: in use by connection '{owners[i]}', not scanned" for i in held]
+    message = "; ".join(lines) + "."
+    if unset:
+        message += " Choose an Interface for each connection without one."
+    if found:
+        message += (
+            " Scanned slaves stay in INIT until a master starts. Review, then save and start."
+        )
+        return {"status": "success", "config": {"connections": form}, "message": message}
+    return {"status": "error", "message": message}
+
+
+def _try_scan(interface: str) -> list[dict[str, Any]] | str:
+    """`scan`, its failure as the one-line reason."""
+    try:
+        return scan(interface)
+    except RuntimeError as e:
+        return str(e)
+
+
+def _interfaces_note() -> str:
+    found = interfaces()
+    listed = ", ".join(f"{i['name']} ({i['detail']})" if i["detail"] else i["name"] for i in found)
+    return (
+        f"Interfaces: {listed or 'none found'}. Pick the one the segment hangs off in a "
+        "connection's Interface dropdown, then Auto-configure lists its slaves. On Linux the "
+        "extension needs CAP_NET_RAW and CAP_NET_ADMIN."
     )
-    return {
-        "status": "success",
-        "config": {"connections": connections},
-        "message": f"Found {summary}. Outputs stay disabled until enabled per connection."
-        + (" " + "; ".join(notes) + "." if notes else ""),
-    }
 
 
 def _scan_main() -> None:
