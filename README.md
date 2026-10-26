@@ -93,8 +93,8 @@ With several connections, pass `connection` to pick one. Slaves are addressed by
 
 ```bash
 zelos actions execute EtherCAT/list_slaves
-zelos actions execute EtherCAT/read_sdo '{"slave": "5", "index": "0x1018", "subindex": 1}'
-zelos actions execute EtherCAT/write_output '{"slave": "3", "output": "Channel 1/Output", "value": "true"}'
+zelos actions execute EtherCAT/read_sdo --params '{"slave": "5", "index": "0x1018", "subindex": 1}'
+zelos actions execute EtherCAT/write_output --params '{"slave": "3", "output": "Channel 1/Output", "value": "true"}'
 ```
 
 ## Development
@@ -104,7 +104,7 @@ just install      # deps + pre-commit hooks
 just format       # ruff format + fix
 just check        # ruff lint + format check
 just test         # pytest
-just dev          # run app mode locally
+just run          # run app mode locally
 just demo         # simulated segment
 just scan [IFACE] # interfaces, or the slaves on one
 ```
@@ -112,7 +112,7 @@ just scan [IFACE] # interfaces, or the slaves on one
 ## Links
 
 - [Zelos Documentation](https://docs.zeloscloud.io)
-- [SDK Guide](https://docs.zeloscloud.io/sdk)
+- [SDK Guide](https://docs.zeloscloud.io/latest/sdk/)
 - [GitHub Issues](https://github.com/zeloscloud/zelos-extension-ethercat/issues)
 
 ## CLI Usage

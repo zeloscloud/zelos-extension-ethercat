@@ -43,19 +43,13 @@ OP_TIMEOUT = 10.0
 STATE_POLL = 0.01
 #: Slave check cadence while the working counter is short (simple_test: 10 ms).
 CHECK_INTERVAL = 0.1
-#: Seconds between `reconfig` attempts on one slave: each pauses process data for the
-#: whole segment while it holds the GIL, and every 100 ms made the pause continuous.
+#: Seconds between `reconfig` attempts on one slave: each pauses the whole segment's process data.
 RECONFIG_BACKOFF = 10.0
-#: Process data watchdog programmed into output slaves. SOEM and IgH write nothing, so
-#: the ESC reset value (100 ms) applies there; 500 ms lengthens it to leave room for
-#: Python pauses on small CPUs while still dropping outputs within half a second of the
-#: master dying. The cycle treats as long a gap between complete exchanges as a drop-out.
+#: Process data watchdog for output slaves: the ESC's 100 ms default, lengthened for Python pauses.
 OUTPUT_WATCHDOG_MS = 500.0
-#: At most one "still recovering" summary per this many seconds; the per-state warnings
-#: are once per slave per episode out of OP.
+#: Seconds between "still out of OP" summaries; per-state warnings are once per episode.
 SUMMARY_INTERVAL = 60.0
-#: GIL switch interval for the process: the default 5 ms lets another thread keep the
-#: GIL that long after the cycle thread's sleep or frame wait returns.
+#: GIL switch interval: the default 5 ms lets another thread hold the GIL past a cycle wake-up.
 SWITCH_INTERVAL = 0.001
 #: The upward transitions a slave accepts, in order (ETG.1000.6 Table 9).
 _LADDER = (protocol.PREOP, protocol.SAFEOP, protocol.OP)
@@ -101,8 +95,7 @@ def open_backend(interface: str) -> Any:
         return SimMaster()
     import pysoem
 
-    # Process data, SDO and FoE calls release the GIL: a long SDO on the actions thread
-    # must not stall the cycle (the slaves' SM watchdog, 100 ms default, would trip).
+    # A long SDO on the actions thread must not stall the cycle and trip the SM watchdog.
     pysoem.settings.always_release_gil = True
     master = pysoem.Master()
     try:
@@ -390,7 +383,7 @@ class Segment:
             with warnings.catch_warnings():  # resolution notice from pysoem
                 warnings.simplefilter("ignore")
                 slave.set_watchdog("processdata", OUTPUT_WATCHDOG_MS)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return f"process data watchdog not set: {e}"
         return ""
 
@@ -517,7 +510,7 @@ class Segment:
             return []
         try:
             return collect()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             return [e]
 
     def _event(self, *parts: str) -> str:
@@ -568,8 +561,7 @@ class Segment:
             period_count += 1
             last_cycle = now
 
-            # Before the next send: an ESC-only slave stays in OP through a watchdog trip
-            # and the next write would drive the old outputs again.
+            # Before the send: an ESC-only slave stays in OP through a watchdog trip.
             if not stalled and now - last_ok >= OUTPUT_WATCHDOG_MS * 1e6:
                 stalled = True
                 self._stall((now - last_ok) / 1e6)
