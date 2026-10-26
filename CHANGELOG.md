@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `demo`: a simulated EK1100 + EL1004 + 2x EL2004 + EL3004 segment; `scan` and `trace` CLI commands.
 - Bit-sized terminals sharing a byte are decoded and written at their FMMU start bit; one straddling a byte is reported (`input_problem` / `output_problem`), its inputs not logged and its outputs refused.
 - No GIL-holding SOEM waits on the cycle path: bring-up and `request_state` poll; `browse_od` only while held below OP; the forced exit past the 3 s shutdown bound.
+- Needs Zelos 26.0.10 or later.
 
 ---
 
