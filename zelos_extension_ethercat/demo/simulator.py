@@ -7,7 +7,11 @@ The segment is the bench the extension is meant for: an EK1100 coupler, an EL100
 mapped with an object dictionary). A test drops a slave by clearing its `present`.
 
 Process data lives in one `io_map` laid out as SOEM's `ecx_config_map_group` does it,
-so a slave's `input` / `output` view is the same byte window pysoem hands out.
+so a slave's `input` / `output` view is the same byte window pysoem hands out. Where a
+real segment and pysoem 1.1.13 diverge from the ideal, the simulator diverges too: SOEM's
+`expected_wkc` undercounts bit slaves, a uC slave counts no outputs in SAFEOP, `reconfig`
+stops at SAFEOP, a power cycle loses the SM/FMMU registers, errors need an ack, a state
+skipping a rung is refused (0x0011), and the SM watchdog trips.
 """
 
 from __future__ import annotations
@@ -40,6 +44,10 @@ from zelos_extension_ethercat.pdo import (
 BECKHOFF = 0x00000002
 #: CoE type indices used below.
 BOOL, SINT, INT, UDINT, VISIBLE_STRING, BIT1, BIT2 = 0x01, 0x02, 0x03, 0x07, 0x09, 0x30, 0x31
+#: AL status codes (ETG.1000.6).
+AL_INVALID_STATE_CHANGE, AL_INVALID_SM_CONFIG, AL_SM_WATCHDOG = 0x0011, 0x0017, 0x001B
+#: ESC reset value of the process data watchdog (0x0420 x 0x0400 divider), ms.
+ESC_WATCHDOG_MS = 100.0
 
 
 # ─── SII image builder ──────────────────────────────────────────────────────
@@ -152,14 +160,40 @@ class SimSlave:
         self.output_bits = 0
         self.objects: dict[int, OdObject] = {}
         self.values: dict[tuple[int, int], bytes] = {}
-        self.present = True
+        self._present = True
+        self.registers = True  # SM/FMMU programmed; lost on a power cycle until reconfig
+        self.watchdog_ms: float | None = None  # None: the ESC reset value
+        self.wd_trips = 0
+        self._last_write = 0.0
         self._io_map = bytearray()
         self._fmmus: list[_Fmmu] = []
         self._in_off = self._out_off = 0
 
+    @property
+    def esc_only(self) -> bool:
+        """No uC (no mailbox): the ESC itself runs the AL state machine and the outputs."""
+        return not self.objects
+
+    @property
+    def present(self) -> bool:
+        return self._present
+
+    @present.setter
+    def present(self, value: bool) -> None:
+        """Off the bus is a power cycle: the station address, SM/FMMU and watchdog
+        registers reset."""
+        if not value:
+            self._current, self.registers, self.watchdog_ms = protocol.NONE, False, None
+        self._present = value
+
     # identity and mapping sources
     def set_watchdog(self, wd_type: str, wd_time_ms: float) -> None:
+        if not self.present:
+            raise RuntimeError("no answer")
         self.watchdog_ms = wd_time_ms
+
+    def add_emergency_callback(self, callback: Any) -> None:
+        pass
 
     def eeprom_read(self, word: int, timeout: int = 20000) -> bytes:
         return self._sii[2 * word : 2 * word + 4].ljust(4, b"\xff")
@@ -171,7 +205,8 @@ class SimSlave:
             return self._alias.to_bytes(2, "little")[:size]
         if FMMU_REGISTER <= address < FMMU_REGISTER + 4 * FMMU_SIZE:
             n = (address - FMMU_REGISTER) // FMMU_SIZE
-            return self._fmmus[n].pack() if n < len(self._fmmus) else bytes(FMMU_SIZE)
+            live = self._fmmus if self.registers else []
+            return live[n].pack() if n < len(live) else bytes(FMMU_SIZE)
         raise RuntimeError(f"register 0x{address:04x} not simulated")
 
     # CoE
@@ -196,21 +231,38 @@ class SimSlave:
             raise RuntimeError(f"SDO abort: 0x{index:04x}:{subindex:02x} is read-only")
         self.values[(index, subindex)] = data
 
-    # state machine
+    # state machine (ETG.1000.6 6.4.1): `_current` carries the ERROR flag
     def write_state(self) -> int:
-        if self.present:
-            self._current = self.state & 0x0F
-            self.al_status = 0
+        if not self.present:
+            return 0
+        wanted, current = self.state & 0x0F, self._current & 0x0F
+        if self._current & protocol.ERROR_FLAG:
+            if not self.state & protocol.ERROR_FLAG:
+                return 1  # ignored until acknowledged
+            self._current, self.al_status = current, 0
+        if wanted <= current or wanted == min(s for s in _RUNGS if s > current):
+            if wanted >= protocol.SAFEOP and not self.registers:
+                self._refuse(AL_INVALID_SM_CONFIG)
+            else:
+                self._current = wanted
+        else:
+            self._refuse(AL_INVALID_STATE_CHANGE)
         return 1
+
+    def _refuse(self, code: int) -> None:
+        self._current |= protocol.ERROR_FLAG
+        self.al_status = code
 
     def state_check(self, expected: int, timeout: int = 2000) -> int:
         self.state = self._current if self.present else protocol.NONE
         return self.state
 
     def reconfig(self, timeout: int = 500) -> int:
+        """`ecx_reconfig_slave`: INIT, SMs, PREOP, SAFEOP, FMMUs; OP is the check loop's."""
         if not self.present:
             return 0
-        self._current = self.state = protocol.OP
+        self.registers, self.al_status = True, 0
+        self._current = self.state = protocol.SAFEOP
         return self.state
 
     def recover(self, timeout: int = 500) -> int:
@@ -221,7 +273,31 @@ class SimSlave:
 
     # process data: pysoem's views are Ibytes/Obytes wide, one byte for a bit slave
     def _view(self, offset: int, bits: int) -> bytes:
-        return bytes(self._io_map[offset : offset + max(1, bits // 8)]) if bits else b""
+        return bytes(self._io_map[offset : offset + (bits + 7) // 8]) if bits else b""
+
+    def _wkc(self) -> int:
+        """This slave's share of one LRW: +1 inputs read, +2 outputs written. A uC slave
+        disables its output SM below OP."""
+        state = self._current & 0x0F
+        if not self.present or not self.registers or state < protocol.SAFEOP:
+            return 0
+        outputs = self.output_bits and (state == protocol.OP or self.esc_only)
+        return (2 if outputs else 0) + (1 if self.input_bits else 0)
+
+    def _watchdog(self, now: float) -> None:
+        """The SM watchdog: no output write within its time trips it. An ESC-only slave
+        stays in OP with its outputs off, and the next write drives them again; a uC slave
+        goes SAFEOP+ERROR 0x001B."""
+        if not self.output_bits or not self.present or not self.registers:
+            self._last_write = 0.0
+            return
+        limit = (self.watchdog_ms or ESC_WATCHDOG_MS) / 1000
+        if self._current == protocol.OP and self._last_write and now - self._last_write > limit:
+            self.wd_trips += 1
+            if not self.esc_only:
+                self._current = protocol.SAFEOP
+                self._refuse(AL_SM_WATCHDOG)
+        self._last_write = now
 
     @property
     def input(self) -> bytes:
@@ -240,6 +316,9 @@ class SimSlave:
         protocol.insert_bits(self._io_map, self._in_off * 8 + self._in_start, self.input_bits, raw)
 
     _in_start = 0
+
+
+_RUNGS = (protocol.INIT, protocol.PREOP, protocol.SAFEOP, protocol.OP)
 
 
 def _ek1100() -> SimSlave:
@@ -389,27 +468,29 @@ class SimMaster:
 
     def config_map(self) -> int:
         """SOEM's layout: every slave's outputs, byte-aligned, then every slave's inputs;
-        bit-sized slaves (fewer than 8 bits) packed back to back at the bit level."""
-        log_addr = self._pack(0, FMMU_TYPE_WRITE)
+        bit-sized slaves (fewer than 8 bits) packed back to back at the bit level.
+        `expected_wkc` as pysoem 1.1.13 reports it: SOEM counts a slave only when it
+        advances the logical address (ethercatconfig.c:1222-1246, 1292-1333)."""
+        log_addr, outputs_wkc = self._pack(0, FMMU_TYPE_WRITE)
         self.output_bytes = log_addr
-        size = self._pack(log_addr, FMMU_TYPE_READ)
+        size, inputs_wkc = self._pack(log_addr, FMMU_TYPE_READ)
         self.io_map = bytearray(size)
         for s in self.slaves:
             s._io_map = self.io_map
             s.state = s._current = protocol.SAFEOP
         self.state = protocol.SAFEOP
-        self.expected_wkc = sum(
-            (2 if s.output_bits else 0) + (1 if s.input_bits else 0) for s in self.slaves
-        )
+        self.expected_wkc = outputs_wkc * 2 + inputs_wkc
         return size
 
-    def _pack(self, log_addr: int, fmmu_type: int) -> int:
-        """`ecx_config_create_*_mappings` for one direction; returns the next byte address."""
-        bit_pos = 0
+    def _pack(self, log_addr: int, fmmu_type: int) -> tuple[int, int]:
+        """`ecx_config_create_*_mappings` for one direction: the next byte address, and
+        SOEM's WKC count for it."""
+        bit_pos = wkc = 0
         for s in self.slaves:
             bits = s.output_bits if fmmu_type == FMMU_TYPE_WRITE else s.input_bits
             if not bits:
                 continue
+            before = log_addr
             if bits > 7:  # byte oriented
                 if bit_pos:
                     log_addr, bit_pos = log_addr + 1, 0
@@ -424,11 +505,12 @@ class SimMaster:
                 if bit_pos > 7:
                     log_addr, bit_pos = log_addr + 1, 0
             s._fmmus.append(fmmu)
+            wkc += log_addr != before
             if fmmu_type == FMMU_TYPE_WRITE:
                 s._out_off = fmmu.log_start
             else:
                 s._in_off, s._in_start = fmmu.log_start, fmmu.start_bit
-        return log_addr + (1 if bit_pos else 0)
+        return log_addr + (1 if bit_pos else 0), wkc
 
     def config_dc(self) -> bool:
         return False
@@ -446,14 +528,15 @@ class SimMaster:
         return len(self.slaves)
 
     def send_processdata(self) -> int:
+        now = time.monotonic()
+        for s in self.slaves:
+            s._watchdog(now)
         self._simulate()
         return 1
 
     def receive_processdata(self, timeout: int = 2000) -> int:
         self.dc_time = time.monotonic_ns()
-        # Below SAFEOP the process data SMs are off, so the slave does not count.
-        present = [s for s in self.slaves if s.present and s._current >= protocol.SAFEOP]
-        return sum((2 if s.output_bits else 0) + (1 if s.input_bits else 0) for s in present)
+        return sum(s._wkc() for s in self.slaves)
 
     # simulation
     def _elapsed(self) -> float:

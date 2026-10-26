@@ -10,7 +10,7 @@
     "connections": {
       "type": "array",
       "title": "Connections",
-      "description": "EtherCAT segments to master. Click 'Add' to add one, or Auto-configure to scan every network interface for slaves.",
+      "description": "EtherCAT segments to master. Click 'Add' to add one. Auto-configure scans only the interfaces chosen here.",
       "default": [],
       "items": {
         "type": "object",
@@ -37,15 +37,15 @@
           "cycle_time": {
             "type": "number",
             "title": "Cycle Time (ms)",
-            "description": "Process data cycle. 10 ms suits a non-real-time host; shorter cycles raise jitter.",
+            "description": "Process data cycle, 0.1 to 100 ms. 10 ms suits a non-real-time host; shorter cycles raise jitter. The cap keeps 5 cycles inside the 500 ms output watchdog.",
             "default": 10,
             "minimum": 0.1,
-            "maximum": 1000
+            "maximum": 100
           },
           "enable_outputs": {
             "type": "boolean",
             "title": "Enable Outputs",
-            "description": "Allow the write_output action to drive this segment's outputs. Off: every output stays zero and the action refuses. Outputs are never written at start, and return to zero when the extension stops.",
+            "description": "Allow the write_output and write_sdo actions to change this segment. Off: every output stays zero and both actions refuse. Outputs are never written at start, and return to zero when the extension stops.",
             "default": false
           },
           "restore_outputs_after_recovery": {

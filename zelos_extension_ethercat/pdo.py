@@ -104,9 +104,13 @@ def _u16(data: bytes) -> int:
 
 
 def _assign_offsets(pdos: list[Pdo]) -> list[Pdo]:
-    """Entries back to back in PDO order, as SOEM lays an SM out."""
+    """Entries back to back in PDO order within an SM; each further SM starts on a byte,
+    since SOEM sizes every SM to whole bytes and maps them back to back (SMlength =
+    (bits + 7) / 8: ethercatcoe.c:871, ethercatconfig.c:723/734)."""
     offset = 0
-    for pdo in pdos:
+    for n, pdo in enumerate(pdos):
+        if n and pdo.sync_manager != pdos[n - 1].sync_manager:
+            offset = (offset + 7) // 8 * 8
         for entry in pdo.entries:
             entry.bit_offset = offset
             offset += entry.bit_length

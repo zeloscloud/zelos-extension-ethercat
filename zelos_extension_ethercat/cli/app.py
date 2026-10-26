@@ -97,8 +97,9 @@ def resolve_connections(config: dict[str, Any]) -> list[dict[str, Any]]:
                 f"Interface '{interface}' is used by two connections; one master per interface"
             )
         cycle = float(connection["cycle_time"])
-        if not 0.1 <= cycle <= 1000:
-            _exit_on(f"connections[{i}] cycle_time {cycle:g} ms is outside 0.1..1000")
+        # 5 cycles inside the 500 ms output watchdog and stall guard.
+        if not 0.1 <= cycle <= 100:
+            _exit_on(f"connections[{i}] cycle_time {cycle:g} ms is outside 0.1..100")
         connection.update(name=name, interface=interface, cycle_time=cycle)
         resolved.append(connection)
     return resolved
