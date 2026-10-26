@@ -113,8 +113,7 @@ def init_sdk(prefix: str) -> zelos_sdk.TraceSource | None:
     connection owns a source and the logs get LOG_SOURCE_NAME. Register actions
     BEFORE calling this: init advertises them to the agent.
     """
-    # init_global_source first, so init() below reuses it instead of creating
-    # a source named after the action namespace.
+    # First, so init() reuses it instead of creating a source named after the namespace.
     source = zelos_sdk.init_global_source(prefix or LOG_SOURCE_NAME)
     zelos_sdk.init(name=ACTION_PREFIX, actions=True)
     logging.getLogger().addHandler(TraceLoggingHandler(source))

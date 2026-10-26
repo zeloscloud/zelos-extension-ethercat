@@ -7,8 +7,7 @@ import zelos_sdk
 #: Default leading trace-source name (`advanced.prefix`).
 DEFAULT_PREFIX = "EtherCAT"
 
-#: Source the extension's logs take when the prefix is cleared; with a prefix
-#: they land in it as `<prefix>/log`. Both names are reserved as connection names.
+#: Log source when the prefix is cleared (else `<prefix>/log`); both are reserved connection names.
 LOG_SOURCE_NAME = "ethercat_log"
 RESERVED_CONNECTION_NAMES = ("log", LOG_SOURCE_NAME)
 

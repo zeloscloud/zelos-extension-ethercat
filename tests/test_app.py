@@ -3,12 +3,15 @@ the action surface, output arming, and recovery from a dropped slave."""
 
 import asyncio
 import time
+import tomllib
+from pathlib import Path
 
 import pytest
 import zelos_sdk
 from conftest import wait_until
+from zelos_sdk.actions import ActionsRegistry
 
-from zelos_extension_ethercat import actions, protocol
+from zelos_extension_ethercat import ACTION_PREFIX, actions, protocol
 from zelos_extension_ethercat import master as master_mod
 from zelos_extension_ethercat.cli import app
 from zelos_extension_ethercat.demo.simulator import SimMaster
@@ -126,8 +129,7 @@ def test_coe_actions_and_output_arming():
                 lambda: segment.slaves[2].al_state == protocol.OP and segment.wkc == 6, 5.0
             )
 
-        # Default: the dropped EL2004's outputs are cleared, the neighbour's bit 4 kept;
-        # the power cycle reset its watchdog, so it is programmed again.
+        # Default: the dropped EL2004's outputs clear, bit 4 stays, its watchdog re-arms.
         await drop_and_recover(sim.slaves[2])
         await wait_until(lambda: sim.io_map[0] == 0b0001_0000, 2.0)
         assert sim.slaves[2].watchdog_ms == 500.0
@@ -194,8 +196,7 @@ def test_outputs_disabled_refuses_writes_and_a_lost_slave_recovers(monkeypatch):
         assert reached == "SAFEOP"
         await asyncio.sleep(0.3)  # recovery must not push it back to OP while held
         assert segment.al_state == protocol.SAFEOP
-        # A held slave that vanishes is flagged lost, recovered and stepped back to its
-        # held state, never above it.
+        # A held slave that vanishes is recovered and stepped back to its held state, never above.
         el2004.present, el2004._current = False, protocol.NONE
         await wait_until(lambda: segment.slaves[2].lost, 3.0)
         el2004.present = True
@@ -314,8 +315,7 @@ def test_bit_slaves_sharing_bytes_merge_and_a_straddler_is_refused(monkeypatch, 
         actions.write_output(slave="5", output="Channel 1/Output", value="true")  # bit 0
         sim: SimMaster = segment.master
         await wait_until(lambda: sim.io_map[:2] == bytes([0b0001_0001, 0b0010_0000]), 2.0)
-        # The first EL1004 (bits 2-5) follows the first EL2004's channel 1; the straddler
-        # logs nothing.
+        # The first EL1004 (bits 2-5) follows the first EL2004; the straddler logs nothing.
         await wait_until(
             lambda: segment._last_logged.get("straddle/3_EL1004/Channel 1") == (True,), 2.0
         )
@@ -355,3 +355,25 @@ def test_auto_config_scans_only_form_interfaces(monkeypatch):
     result = actions.auto_config({"connections": form})
     assert scanned == ["eth2"] and result["config"]["connections"] == form
     assert result["message"].startswith("eth2: 2 slaves (EK1100, EL1004).")
+
+
+def test_auto_config_without_the_form_scans_the_saved_interfaces(tmp_path, monkeypatch):
+    from zelos_extension_ethercat import autoconfig
+
+    saved = tmp_path / "config.json"
+    saved.write_text('{"connections": [{"name": "line", "interface": "eth2"}]}')
+    monkeypatch.setenv("ZELOS_CONFIG_PATH", str(saved))
+    monkeypatch.chdir(Path(__file__).parents[1])
+    monkeypatch.setattr(autoconfig, "interfaces", lambda: [{"name": "eth2", "detail": "up, igb"}])
+    monkeypatch.setattr(autoconfig, "scan", lambda interface: [{"name": "EK1100"}])
+    registry = ActionsRegistry()
+    actions.register_actions(registry)
+    result = registry.execute("auto_config", {}).value
+    assert result["message"].startswith("eth2: 1 slave (EK1100).")
+    assert [c["name"] for c in result["config"]["connections"]] == ["line"]
+
+
+def test_the_name_is_the_action_prefix():
+    """Live actions register under ACTION_PREFIX; stopped ones under the manifest name."""
+    manifest = tomllib.loads((Path(__file__).parents[1] / "extension.toml").read_text())
+    assert manifest["name"] == ACTION_PREFIX == "EtherCAT"

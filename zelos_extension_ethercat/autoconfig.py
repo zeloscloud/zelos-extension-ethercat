@@ -4,8 +4,7 @@ A scan opens a raw socket and runs SOEM `config_init`, which needs CAP_NET_RAW a
 broadcasts INIT to every slave on the NIC, dropping a segment another master runs there
 out of OP: only on an interface the user names (the form's, or the CLI's), never on one
 of this extension's running connections. It runs in a child process killed at a
-deadline, as the CAN extension scans gs_usb: a stuck pcap open must not sit in the live
-extension.
+deadline: a stuck pcap open must not sit in the live extension.
 """
 
 from __future__ import annotations
