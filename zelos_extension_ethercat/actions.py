@@ -93,6 +93,7 @@ def _run(what: str, call: Any) -> Any:
 @zelos_sdk.action(
     "Get Status",
     "Master state, working counter and cycle statistics; every connection when omitted",
+    read_only=True,
 )
 @_connection_field
 def get_status(connection: str = "") -> dict[str, Any]:
@@ -103,7 +104,9 @@ def get_status(connection: str = "") -> dict[str, Any]:
 
 
 @zelos_sdk.action(
-    "List Slaves", "The slaves found on the segment: identity, AL state, mapping and trace names"
+    "List Slaves",
+    "The slaves found on the segment: identity, AL state, mapping and trace names",
+    read_only=True,
 )
 @_connection_field
 def list_slaves(connection: str = "") -> dict[str, Any]:
@@ -113,7 +116,9 @@ def list_slaves(connection: str = "") -> dict[str, Any]:
 
 
 @zelos_sdk.action(
-    "List PDOs", "A slave's process data mapping: each PDO event, its entries, offsets and types"
+    "List PDOs",
+    "A slave's process data mapping: each PDO event, its entries, offsets and types",
+    read_only=True,
 )
 @_connection_field
 @_slave_field
@@ -127,7 +132,7 @@ def list_pdos(slave: str, connection: str = "") -> dict[str, Any]:
 # ─── CoE ────────────────────────────────────────────────────────────────────
 
 
-@zelos_sdk.action("Read SDO", "Read a CoE object (SDO upload)")
+@zelos_sdk.action("Read SDO", "Read a CoE object (SDO upload)", read_only=True)
 @_connection_field
 @_slave_field
 @zelos_sdk.action.text("index", title="Index", description="e.g. 0x1018")
