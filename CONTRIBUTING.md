@@ -29,6 +29,7 @@ The agent runtime and its tests:
 | `zelos_extension_ethercat/cli/app.py`        | Config load, `connections[]` and `advanced` resolution, startup validation |
 | `zelos_extension_ethercat/demo/simulator.py` | The simulated segment behind pysoem's master and slave surface             |
 | `tests/test_app.py`                          | The demo segment end to end: bring-up, trace, actions and recovery         |
+| `tests/test_action_flags.py`                 | Each action's read-only and hidden flags                                   |
 | `tests/test_pdo.py`                          | PDO mapping from the SII and from CoE, FMMU spans and naming               |
 | `tests/test_protocol.py`                     | Value codecs                                                               |
 | `tests/conftest.py`                          | Shared test helpers                                                        |

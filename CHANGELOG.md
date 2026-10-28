@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Needs Zelos 26.0.10 or later.
+- Zelos AI runs Get Status, List Slaves, List PDOs and Read SDO without asking first: they only read.
 
 ---
 
