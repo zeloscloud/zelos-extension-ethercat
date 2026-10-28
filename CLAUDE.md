@@ -29,6 +29,7 @@ just package      # zelos extensions package .
 | `zelos_extension_ethercat/demo/simulator.py` | `SimMaster` / `SimSlave`: pysoem's surface over a simulated segment; `build_sii` |
 | `tests/test_protocol.py`, `tests/test_pdo.py` | The pure seams |
 | `tests/test_app.py` | The demo segment end to end: trace, actions, output arming, recovery |
+| `tests/test_action_flags.py` | Every action's `read_only` and `hidden` flags |
 
 ## Architecture
 
@@ -68,6 +69,7 @@ just package      # zelos extensions package .
 
 - Free functions in `actions.py`, bound via `set_connections`. Optional `connection`: `ValueError` listing names when omitted with several; `get_status` covers all. Slaves by position, trace name or unique device name (`Segment.find_slave`).
 - Failure convention: **raise**. Input errors `ValueError`; not running `RuntimeError`; unknown mailbox errors become `RuntimeError` after `logger.exception` (`_run`).
+- `read_only` (Zelos AI runs them without asking first): `get_status`, `list_slaves`, `list_pdos`, `read_sdo`, `list_interfaces`. `browse_od` is not: the walk pauses process data. `tests/test_action_flags.py` pins every action's flags.
 - Standalone + hidden: `list_interfaces` (`read_only`; the schema's `action-choices` for Interface) and `auto_config` (the schema's `ui:options.autoconfig`). `auto_config` scans only the interfaces the form's connections name (TwinCAT, SOEM slaveinfo, IgH convention), in parallel child processes, 5 s deadline each; slaves per interface in the message, form connections kept as entered (no per-slave config to fill), demo when empty, interface list when none is chosen; `status: error` when no slave is found. Not `read_only`: `config_init` broadcasts INIT and drops a segment another master runs out of OP. Skips an interface a starting/running connection owns (standalone actions also run in the live process). Keep the schema in step.
 - `browse_od` raises in OP (the OD walk pauses process data): `request_state SAFEOP` first.
 
