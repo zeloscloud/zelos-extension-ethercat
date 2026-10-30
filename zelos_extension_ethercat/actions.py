@@ -321,28 +321,16 @@ def list_interfaces() -> dict[str, Any]:
     "config",
     properties={},
     title="Config",
-    description="The config form's current (possibly unsaved) data. Empty: the saved config",
-    required=False,
+    description="The config form's current (possibly unsaved) data",
 )
-def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+def auto_config(config: dict[str, Any]) -> dict[str, Any]:
     from zelos_extension_ethercat.autoconfig import propose
 
-    if config is None:
-        config = _saved_config()
     # Standalone actions also run in the live process: never scan under a running master.
     owners = {
         c.interface: c.name for c in _connections.values() if c.state in ("starting", "running")
     }
     return propose([c for c in config.get("connections") or [] if isinstance(c, dict)], owners)
-
-
-def _saved_config() -> dict[str, Any]:
-    try:
-        from zelos_sdk.extensions import load_config
-
-        return load_config() or {}
-    except Exception:  # no config yet, or it does not validate
-        return {}
 
 
 def register_actions(registry: ActionsRegistry) -> list[str]:
