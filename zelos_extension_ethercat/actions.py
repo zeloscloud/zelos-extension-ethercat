@@ -93,6 +93,7 @@ def _run(what: str, call: Any) -> Any:
 @zelos_sdk.action(
     "Get Status",
     "Master state, working counter and cycle statistics; every connection when omitted",
+    read_only=True,
 )
 @_connection_field
 def get_status(connection: str = "") -> dict[str, Any]:
@@ -103,7 +104,9 @@ def get_status(connection: str = "") -> dict[str, Any]:
 
 
 @zelos_sdk.action(
-    "List Slaves", "The slaves found on the segment: identity, AL state, mapping and trace names"
+    "List Slaves",
+    "The slaves found on the segment: identity, AL state, mapping and trace names",
+    read_only=True,
 )
 @_connection_field
 def list_slaves(connection: str = "") -> dict[str, Any]:
@@ -113,7 +116,9 @@ def list_slaves(connection: str = "") -> dict[str, Any]:
 
 
 @zelos_sdk.action(
-    "List PDOs", "A slave's process data mapping: each PDO event, its entries, offsets and types"
+    "List PDOs",
+    "A slave's process data mapping: each PDO event, its entries, offsets and types",
+    read_only=True,
 )
 @_connection_field
 @_slave_field
@@ -127,7 +132,7 @@ def list_pdos(slave: str, connection: str = "") -> dict[str, Any]:
 # ─── CoE ────────────────────────────────────────────────────────────────────
 
 
-@zelos_sdk.action("Read SDO", "Read a CoE object (SDO upload)")
+@zelos_sdk.action("Read SDO", "Read a CoE object (SDO upload)", read_only=True)
 @_connection_field
 @_slave_field
 @zelos_sdk.action.text("index", title="Index", description="e.g. 0x1018")
@@ -316,28 +321,16 @@ def list_interfaces() -> dict[str, Any]:
     "config",
     properties={},
     title="Config",
-    description="The config form's current (possibly unsaved) data. Empty: the saved config",
-    required=False,
+    description="The config form's current (possibly unsaved) data",
 )
-def auto_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+def auto_config(config: dict[str, Any]) -> dict[str, Any]:
     from zelos_extension_ethercat.autoconfig import propose
 
-    if config is None:
-        config = _saved_config()
     # Standalone actions also run in the live process: never scan under a running master.
     owners = {
         c.interface: c.name for c in _connections.values() if c.state in ("starting", "running")
     }
     return propose([c for c in config.get("connections") or [] if isinstance(c, dict)], owners)
-
-
-def _saved_config() -> dict[str, Any]:
-    try:
-        from zelos_sdk.extensions import load_config
-
-        return load_config() or {}
-    except Exception:  # no config yet, or it does not validate
-        return {}
 
 
 def register_actions(registry: ActionsRegistry) -> list[str]:

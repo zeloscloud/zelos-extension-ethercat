@@ -1,8 +1,8 @@
 [project]
 name = "zelos-extension-ethercat"
 version = "0.1.0"
-description = "EtherCAT master extension for Zelos: scan, process data, diagnostics and CoE"
-authors = [{ name = "Zelos Cloud", email = "support@zeloscloud.io" }]
+description = "EtherCAT master on a dedicated network interface: scan slaves, trace every PDO by name, watch the working counter and AL states, and read or write CoE SDOs. Needs raw-frame access, such as CAP_NET_RAW and CAP_NET_ADMIN on Linux or Npcap on Windows; outputs stay off until enabled."
+authors = [{ name = "Zelos", email = "support@zeloscloud.io" }]
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
@@ -10,22 +10,17 @@ keywords = ["zelos", "extension", "ethercat", "fieldbus", "industrial", "automat
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "Intended Audience :: Manufacturing",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Topic :: Scientific/Engineering :: Interface Engine/Protocol Translator",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    # 0.0.13a1 floor, as the other agent extensions: standalone actions need the
-    # at-rest harness, and a prerelease floor on the direct dep is what lets uv
-    # resolve one.
     "zelos-sdk>=0.0.13a1",
     "rich-click>=1.8.0",
-    # SOEM binding: prebuilt wheels for Linux x86_64/aarch64 (manylinux, musl), macOS
-    # and Windows, so the install compiles nothing. Pinned: it carries SOEM itself.
+    # Pinned: the master depends on this release's SOEM and GIL handling.
     "pysoem==1.1.13",
 ]
 
@@ -33,19 +28,21 @@ dependencies = [
 Homepage = "https://github.com/zeloscloud/zelos-extension-ethercat"
 Repository = "https://github.com/zeloscloud/zelos-extension-ethercat"
 Issues = "https://github.com/zeloscloud/zelos-extension-ethercat/issues"
-Documentation = "https://docs.zeloscloud.io/extensions"
+Documentation = "https://docs.zeloscloud.io/app/extensions/"
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
-    "pytest>=8.4.2",
-    "pre-commit>=4.3.0",
-    "ruff>=0.14.2",
-    "tomli>=2.3.0; python_version < '3.11'",
+    "pytest>=9.1.1",
+    "pre-commit>=4.6.2",
+    "ruff>=0.16.10",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv]
+required-version = ">=0.9.5"
 
 [tool.hatch.build.targets.wheel]
 packages = ["zelos_extension_ethercat"]
@@ -55,7 +52,7 @@ testpaths = ["tests"]
 addopts = "--log-cli-level=INFO"
 
 [tool.ruff]
-target-version = "py311"
+target-version = 'py311'
 line-length = 100
 
 [tool.ruff.lint]
@@ -72,6 +69,3 @@ select = [
 ignore = [
     "B008",   # function call in defaults (common in decorators)
 ]
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"

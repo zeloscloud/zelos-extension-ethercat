@@ -43,7 +43,7 @@ from zelos_extension_ethercat.pdo import (
 
 BECKHOFF = 0x00000002
 #: CoE type indices used below.
-BOOL, SINT, INT, UDINT, VISIBLE_STRING, BIT1, BIT2 = 0x01, 0x02, 0x03, 0x07, 0x09, 0x30, 0x31
+BOOL, INT, UDINT, VISIBLE_STRING, BIT1, BIT2 = 0x01, 0x03, 0x07, 0x09, 0x30, 0x31
 #: AL status codes (ETG.1000.6).
 AL_INVALID_STATE_CHANGE, AL_INVALID_SM_CONFIG, AL_SM_WATCHDOG = 0x0011, 0x0017, 0x001B
 #: ESC reset value of the process data watchdog (0x0420 x 0x0400 divider), ms.
@@ -451,13 +451,12 @@ class SimMaster:
         self._layout = layout
         self._t0 = time.monotonic()
         self._rng = random.Random(1)
-        self._open = False
 
     def open(self, interface: str) -> None:
-        self._open = True
+        pass
 
     def close(self) -> None:
-        self._open = False
+        pass
 
     def config_init(self, usetable: bool = False) -> int:
         self.slaves = [make_slave(model) for model in self._layout]

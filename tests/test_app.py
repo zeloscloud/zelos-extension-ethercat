@@ -126,8 +126,7 @@ def test_coe_actions_and_output_arming():
                 lambda: segment.slaves[2].al_state == protocol.OP and segment.wkc == 6, 5.0
             )
 
-        # Default: the dropped EL2004's outputs are cleared, the neighbour's bit 4 kept;
-        # the power cycle reset its watchdog, so it is programmed again.
+        # Default: the dropped EL2004's outputs clear, bit 4 stays, its watchdog re-arms.
         await drop_and_recover(sim.slaves[2])
         await wait_until(lambda: sim.io_map[0] == 0b0001_0000, 2.0)
         assert sim.slaves[2].watchdog_ms == 500.0
@@ -194,8 +193,7 @@ def test_outputs_disabled_refuses_writes_and_a_lost_slave_recovers(monkeypatch):
         assert reached == "SAFEOP"
         await asyncio.sleep(0.3)  # recovery must not push it back to OP while held
         assert segment.al_state == protocol.SAFEOP
-        # A held slave that vanishes is flagged lost, recovered and stepped back to its
-        # held state, never above it.
+        # A held slave that vanishes is recovered and stepped back to its held state, never above.
         el2004.present, el2004._current = False, protocol.NONE
         await wait_until(lambda: segment.slaves[2].lost, 3.0)
         el2004.present = True
@@ -314,8 +312,7 @@ def test_bit_slaves_sharing_bytes_merge_and_a_straddler_is_refused(monkeypatch, 
         actions.write_output(slave="5", output="Channel 1/Output", value="true")  # bit 0
         sim: SimMaster = segment.master
         await wait_until(lambda: sim.io_map[:2] == bytes([0b0001_0001, 0b0010_0000]), 2.0)
-        # The first EL1004 (bits 2-5) follows the first EL2004's channel 1; the straddler
-        # logs nothing.
+        # The first EL1004 (bits 2-5) follows the first EL2004; the straddler logs nothing.
         await wait_until(
             lambda: segment._last_logged.get("straddle/3_EL1004/Channel 1") == (True,), 2.0
         )
