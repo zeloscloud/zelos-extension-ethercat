@@ -2,6 +2,7 @@
 the action surface, output arming, and recovery from a dropped slave."""
 
 import asyncio
+import signal
 import time
 import tomllib
 from pathlib import Path
@@ -322,6 +323,34 @@ def test_bit_slaves_sharing_bytes_merge_and_a_straddler_is_refused(monkeypatch, 
         assert not any(e.startswith("straddle/4_EL1004/") for e in segment._last_logged)
 
     asyncio.run(_running(segment, body))
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
+def test_a_stop_signal_ends_the_run_on_a_loop_without_signal_handlers(signum):
+    """Windows' event loops raise NotImplementedError from add_signal_handler."""
+    segment, _ = _segment()
+    prior = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+
+    def unsupported(*_args):
+        raise NotImplementedError
+
+    async def main():
+        asyncio.get_running_loop().add_signal_handler = unsupported
+
+        async def signal_when_running():
+            await wait_until(lambda: segment.state == "running", 5.0)
+            signal.raise_signal(signum)
+
+        signaller = asyncio.create_task(signal_when_running())
+        await asyncio.wait_for(app.run_until_stopped({segment.name: segment}), 10.0)
+        await signaller
+
+    try:
+        asyncio.run(main())
+    finally:
+        for s, handler in prior.items():
+            signal.signal(s, handler)
+    assert segment.state == "stopped"
 
 
 def test_resolve_connections_names_and_rejects_duplicates(caplog):
