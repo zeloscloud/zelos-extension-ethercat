@@ -285,6 +285,28 @@ def test_a_stalled_cycle_drops_outputs_before_the_next_send():
     asyncio.run(_running(segment, body))
 
 
+def test_a_cycle_failure_raises_and_a_stop_does_not():
+    """The app exits non-zero only on a failure: a dead cycle raises, a stop returns."""
+    segment, _ = _segment(name="dies")
+
+    async def dies():
+        task = asyncio.create_task(segment.run(asyncio.Event()))  # never stopped
+        await wait_until(lambda: segment.state == "running", 5.0)
+
+        def vanished():
+            raise OSError("interface gone")
+
+        segment.master.send_processdata = vanished
+        await asyncio.wait_for(task, 5.0)
+
+    with pytest.raises(master_mod.SegmentError, match="interface gone"):
+        asyncio.run(dies())
+
+    segment, _ = _segment(name="stops")
+    asyncio.run(_running(segment, lambda stop: asyncio.sleep(0.1)))
+    assert segment.state == "stopped"
+
+
 def test_bit_slaves_sharing_bytes_merge_and_a_straddler_is_refused(monkeypatch, caplog):
     """Inputs EL1002 + EL1004 + EL1004 (bits 0-1, 2-5, 6-9) and outputs EL2004 + EL2004 +
     EL2002 + EL2004 + EL2004 (0-3, 4-7, 8-9, 10-13, 14-17): the writes of each terminal

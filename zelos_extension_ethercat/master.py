@@ -236,7 +236,7 @@ class Segment:
     async def run(self, stop: asyncio.Event) -> None:
         """Bring the segment up and exchange process data until `stop`.
 
-        :raises SegmentError: bring-up failed (first contact is required)
+        :raises SegmentError: bring-up failed (first contact is required), or the cycle did
         """
         self.state = "starting"
         # Daemon: the app's forced exit must not wait on a GIL-holding SOEM call.
@@ -258,6 +258,8 @@ class Segment:
         stopping.cancel()
         self._stop.set()
         await thread_done
+        if self.state == "failed" and not stop.is_set():  # the cycle died: exit non-zero
+            raise SegmentError(self.error)
 
     def _thread_main(self) -> None:
         sys.setswitchinterval(min(sys.getswitchinterval(), SWITCH_INTERVAL))
