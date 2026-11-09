@@ -155,7 +155,7 @@ class SimSlave:
         self.state = protocol.INIT  # pysoem: the cached state, and the request after assignment
         self._current = protocol.INIT
         self.al_status = 0
-        self.is_lost = False
+        self.is_lost = 0  # as pysoem: SOEM's uint8
         self.input_bits = 0
         self.output_bits = 0
         self.objects: dict[int, OdObject] = {}
