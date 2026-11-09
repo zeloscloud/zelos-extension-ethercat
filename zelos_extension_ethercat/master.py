@@ -813,7 +813,7 @@ class Segment:
             info.al_state, info.al_status_code, info.lost = (
                 slave.state,
                 slave.al_status,
-                slave.is_lost,
+                bool(slave.is_lost),  # pysoem returns SOEM's uint8
             )
             if slave.state == protocol.OP:
                 info.warned.clear()
