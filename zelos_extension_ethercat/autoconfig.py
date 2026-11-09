@@ -33,12 +33,44 @@ _SKIP_PREFIXES = (
     "tap",
     "vcan",
     "can",
+    "utun",  # macOS: tunnels, Wi-Fi peer links, bridges
+    "awdl",
+    "llw",
+    "gif",
+    "stf",
+    "anpi",
+    "bridge",
 )
 
 
+def _ipv4(name: str) -> tuple[str, list[str] | None]:
+    """`name`'s friendly name (Windows) and IPv4 addresses. ifaddr lists only addressed
+    adapters on Linux and macOS, so absent means none there; on Windows it lists every
+    adapter, matched by the GUID in pysoem's `\\Device\\NPF_{GUID}`, and absent means
+    unknown (None)."""
+    import ifaddr
+
+    windows = sys.platform == "win32"
+    found = [a for a in ifaddr.get_adapters() if a.name == name or (windows and a.name in name)]
+    if not found and windows:
+        return "", None
+    nice = found[0].nice_name if windows else ""
+    return nice, [str(ip.ip) for a in found for ip in a.ips if ip.is_IPv4]
+
+
+def _default_route_interfaces() -> set[str]:
+    """Linux: the interfaces holding a default route (destination 0.0.0.0 in /proc/net/route)."""
+    with contextlib.suppress(OSError):
+        lines = Path("/proc/net/route").read_text().splitlines()[1:]
+        return {f[0] for f in (line.split() for line in lines) if len(f) > 1 and f[1] == "00000000"}
+    return set()
+
+
 def interfaces() -> list[dict[str, str]]:
-    """Candidate NICs as `{name, detail}`: pysoem's adapter list, minus the virtual and
-    loopback ones; on Linux `detail` carries the link state and driver from sysfs."""
+    """Candidate NICs as `{name, detail}`, as the packet extension lists them: pysoem's
+    adapters minus the virtual and loopback ones, those without an IP address first (an
+    EtherCAT NIC carries no IP traffic). `detail` shows the link state and driver (Linux),
+    the adapter's name (Windows), its IPv4 address and the default route."""
     try:
         import pysoem
 
@@ -46,6 +78,7 @@ def interfaces() -> list[dict[str, str]]:
     except Exception:
         return []
     found = []
+    routed = _default_route_interfaces()
     for adapter in adapters:
         name = adapter.name
         if name.startswith(_SKIP_PREFIXES):
@@ -59,14 +92,15 @@ def interfaces() -> list[dict[str, str]]:
             driver = _SYS_CLASS_NET / name / "device" / "driver"
             if driver.exists():
                 notes.append(driver.resolve().name)
-        elif adapter.desc:
-            desc = (
-                adapter.desc.decode(errors="replace")
-                if isinstance(adapter.desc, bytes)
-                else str(adapter.desc)
-            )
-            notes.append(desc)
-        found.append({"name": name, "detail": ", ".join(n for n in notes if n and n != "unknown")})
+        nice, ips = _ipv4(name)
+        if adapter.desc and sys.platform != "linux":
+            desc = adapter.desc
+            notes += [nice, desc.decode(errors="replace") if isinstance(desc, bytes) else str(desc)]
+        if ips is not None:
+            notes += [*ips[:1], "default route"] if name in routed else ips[:1] or ["no IP"]
+        notes = list(dict.fromkeys(n for n in notes if n and n not in ("unknown", name)))
+        found.append({"name": name, "detail": " · ".join(notes), "_rank": ips != []})
+    found.sort(key=lambda i: (i.pop("_rank"), i["name"]))
     return found
 
 
@@ -125,6 +159,11 @@ def propose(form: list[dict[str, Any]], owners: dict[str, str]) -> dict[str, Any
         for i, r in found
     ]
     lines += [f"{i}: no slaves" for i, r in results.items() if r == []]
+    lines += [
+        f"{i} carries {', '.join(ips)}: EtherCAT needs a NIC without IP traffic"
+        for i in chosen
+        if (ips := _ipv4(i)[1])
+    ]
     lines += [f"{i}: scan failed: {r}" for i, r in results.items() if isinstance(r, str)]
     lines += [f"{i}: in use by connection '{owners[i]}', not scanned" for i in held]
     message = "; ".join(lines) + "."
