@@ -7,7 +7,7 @@ repository = "https://github.com/zeloscloud/zelos-extension-ethercat"
 # author and repository. Zelos AI sees the name, description and keywords, not the categories.
 keywords = ["ethercat", "fieldbus", "industrial", "plc", "automation", "soem", "coe", "ethernet for control automation technology", "pysoem", "pdo", "process data", "sdo", "object dictionary", "al state", "working counter", "distributed clocks", "slave", "beckhoff", "ek1100", "el1004"]
 categories = ["Industrial", "IoT", "Protocol", "Embedded", "Diagnostics", "Networking"]
-icon = "assets/icon.svg"
+icon = "assets/icon.png"
 readme = "README.md"
 
 [zelos]
