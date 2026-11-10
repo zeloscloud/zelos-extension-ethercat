@@ -11,6 +11,7 @@ dependencies = [
     "rich-click>=1.8.0",
     # Pinned: the master depends on this release's SOEM and GIL handling.
     "pysoem==1.1.13",
+    "ifaddr>=0.2,<0.3",
 ]
 
 [project.urls]
