@@ -105,6 +105,10 @@ demo:
 scan *ARGS:
     uv run python main.py scan {{ARGS}}
 
+# Against a real segment, as root (drives one output): ZELOS_ETHERCAT_IFACE=<nic> just hil
+hil *ARGS:
+    uv run pytest tests/test_hil.py {{ARGS}}
+
 # Update uv.lock after changing dependencies
 lock:
     uv lock

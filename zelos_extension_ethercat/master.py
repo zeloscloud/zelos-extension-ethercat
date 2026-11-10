@@ -47,6 +47,9 @@ CHECK_INTERVAL = 0.1
 RECONFIG_BACKOFF = 10.0
 #: Process data watchdog for output slaves: the ESC's 100 ms default, lengthened for Python pauses.
 OUTPUT_WATCHDOG_MS = 500.0
+#: Host-side stall threshold, half the watchdog: outputs are zeroed before the ESC can
+#: trip, so the next frame never re-drives a value the watchdog already dropped.
+STALL_MS = OUTPUT_WATCHDOG_MS / 2
 #: Seconds between "still out of OP" summaries; per-state warnings are once per episode.
 SUMMARY_INTERVAL = 60.0
 #: GIL switch interval: the default 5 ms lets another thread hold the GIL past a cycle wake-up.
@@ -271,6 +274,10 @@ class Segment:
             else:
                 self.state, self.error = "failed", str(e)
                 logger.error("[%s] %s", self.name, e)
+            with contextlib.suppress(Exception):  # slaves may have reached SAFEOP or OP
+                if self.master is not None and self.master.slaves:
+                    self.master.state = protocol.INIT
+                    self.master.write_state()
             self._close()
             return
         self.state = "running"
@@ -386,14 +393,16 @@ class Segment:
                 warnings.simplefilter("ignore")
                 slave.set_watchdog("processdata", OUTPUT_WATCHDOG_MS)
         except Exception as e:
-            return f"process data watchdog not set: {e}"
+            return f"process data watchdog not set: {protocol.describe_error(e)}"
         return ""
 
     def _rearm_watchdog(self, info: SlaveInfo, slave: Any) -> None:
+        """Re-arm after a reconfig / recover; on failure the slave's outputs go to zero and
+        stay refused: the ESC default (100 ms) would trip inside STALL_MS."""
         if not info.output_problem and (problem := self._arm_watchdog(info, slave)):
-            logger.warning(
-                "[%s] %s: %s; the ESC default (100 ms) applies", self.name, info.trace_name, problem
-            )
+            self._stage_zero({info.position})
+            info.output_problem = problem
+            logger.error("[%s] %s: %s; outputs refused", self.name, info.trace_name, problem)
 
     def _laggards(self, wanted: int) -> str:
         self.master.read_state()
@@ -454,7 +463,12 @@ class Segment:
                 lookup = self._od_lookup(info, slave, discarded)
                 return pdo_mod.read_coe_map(slave.sdo_read, lookup)
             except Exception as e:  # any failure of the walk: the SII is next
-                logger.info("[%s] %s: %s; mapping from SII", self.name, info.trace_name, e)
+                logger.info(
+                    "[%s] %s: %s; mapping from SII",
+                    self.name,
+                    info.trace_name,
+                    protocol.describe_error(e),
+                )
             finally:
                 discarded += self._drain_errors()
                 if discarded:
@@ -563,11 +577,13 @@ class Segment:
             period_count += 1
             last_cycle = now
 
-            # Before the send: an ESC-only slave stays in OP through a watchdog trip.
-            if not stalled and now - last_ok >= OUTPUT_WATCHDOG_MS * 1e6:
-                stalled = True
-                self._stall((now - last_ok) / 1e6)
             self._apply_outputs()
+            # Just before the send: an ESC-only slave stays in OP through a watchdog trip.
+            gap_ns = time.perf_counter_ns() - last_ok
+            if not stalled and gap_ns >= STALL_MS * 1e6:
+                stalled = True
+                self._stall(gap_ns / 1e6)
+                self._apply_outputs()
             self.master.send_processdata()
             self.wkc = self.master.receive_processdata(timeout_us)
             t_ns = time.time_ns()
@@ -594,8 +610,8 @@ class Segment:
                 self._diagnostics_tick(t_ns)
 
     def _stall(self, gap_ms: float) -> None:
-        """No complete exchange for OUTPUT_WATCHDOG_MS: every output slave's watchdog has
-        tripped, so its outputs drop as for a drop-out (`_drop_outputs`)."""
+        """No complete exchange for STALL_MS: every output slave's watchdog may trip, so
+        its outputs drop as for a drop-out (`_drop_outputs`)."""
         logger.warning(
             "[%s] no complete exchange for %.0f ms (output watchdog %g ms); treating as a "
             "drop-out of every output slave",
@@ -764,14 +780,16 @@ class Segment:
             if not self._requests:
                 return
             req = self._request = self._requests.popleft()
-            if req.info is None:
-                self._requested_state = req.wanted
-            for info, _ in self._targets(req):
-                info.requested_state = req.wanted
-                info.reconfig_at = 0.0  # a request is a fresh start for the backoff
-                info.stepping = False
-            if req.wanted != protocol.OP:
-                self._stage_zero(None if req.info is None else {req.info.position})
+            # Under the output lock: a write_output checks the hold under it too.
+            with self._out_lock:
+                if req.info is None:
+                    self._requested_state = req.wanted
+                for info, _ in self._targets(req):
+                    info.requested_state = req.wanted
+                    info.reconfig_at = 0.0  # a request is a fresh start for the backoff
+                    info.stepping = False
+                if req.wanted != protocol.OP:
+                    self._stage_zero_locked(None if req.info is None else {req.info.position})
             self._read_states()
             lowest = min(s.state & 0x0F for _, s in self._targets(req))
             req.steps = [s for s in _LADDER if lowest < s < req.wanted] + [req.wanted]
@@ -930,14 +948,17 @@ class Segment:
         """Zero the staged outputs of every writable slave (or `positions`) for the next
         exchange; returns the number of slaves staged in all."""
         with self._out_lock:
-            for info, slave in zip(self.slaves, self.master.slaves, strict=True):
-                if (
-                    info.map.outputs
-                    and not info.output_problem
-                    and (positions is None or info.position in positions)
-                ):
-                    self._staged[info.position] = bytearray(len(slave.output))
-            self._dirty = True
+            return self._stage_zero_locked(positions)
+
+    def _stage_zero_locked(self, positions: Iterable[int] | None) -> int:
+        for info, slave in zip(self.slaves, self.master.slaves, strict=True):
+            if (
+                info.map.outputs
+                and not info.output_problem
+                and (positions is None or info.position in positions)
+            ):
+                self._staged[info.position] = bytearray(len(slave.output))
+        self._dirty = True
         return len(self._staged)
 
     def _drop_outputs(self, info: SlaveInfo) -> None:
@@ -1122,17 +1143,18 @@ class Segment:
                 f"outputs are disabled on connection '{self.name}'; enable 'Enable Outputs' "
                 "on the connection and restart to drive outputs"
             )
-        if self._requested_state != protocol.OP or info.requested_state != protocol.OP:
-            raise ValueError(
-                f"{info.trace_name} is held below OP by request_state; request OP first"
-            )
-        if info.output_problem:
-            raise ValueError(
-                f"outputs of {info.trace_name} cannot be written: {info.output_problem}"
-            )
         value = protocol.coerce(text, entry.kind)
         raw = protocol.encode(value, entry.bit_length, entry.kind)
         with self._out_lock:
+            # Under the lock: a state request holds and zeroes under it too.
+            if self._requested_state != protocol.OP or info.requested_state != protocol.OP:
+                raise ValueError(
+                    f"{info.trace_name} is held below OP by request_state; request OP first"
+                )
+            if info.output_problem:
+                raise ValueError(
+                    f"outputs of {info.trace_name} cannot be written: {info.output_problem}"
+                )
             protocol.insert_bits(
                 self._staged[info.position],
                 info.output_span.start_bit + entry.bit_offset,
@@ -1157,10 +1179,14 @@ class Segment:
         self._require_running()
         req = StateRequest(protocol.REQUESTABLE_STATES[state_name], info)
         self._requests.append(req)
-        deadline = time.monotonic() + len(_LADDER) * EC_TIMEOUTSTATE / 1e6 + 1.0
+        # Each rung, plus a reconfig the cycle may be in (up to 3 rungs itself).
+        deadline = time.monotonic() + 2 * len(_LADDER) * EC_TIMEOUTSTATE / 1e6 + 1.0
         while not req.done.wait(STATE_POLL):
             if self.state != "running" or time.monotonic() >= deadline:
-                raise RuntimeError(f"connection '{self.name}' is {self.state}; request not served")
+                with contextlib.suppress(ValueError):  # not started: never served
+                    self._requests.remove(req)
+                why = "timed out" if self.state == "running" else self.state
+                raise RuntimeError(f"connection '{self.name}': {state_name} request {why}")
         logger.warning(
             "[%s] %s requested for %s; reached %s",
             self.name,

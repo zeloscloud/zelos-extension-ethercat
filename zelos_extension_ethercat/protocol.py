@@ -211,3 +211,13 @@ def decode_sdo(data: bytes, data_type: str) -> object:
 def sanitize(value: str, kind: str = "source") -> str:
     """A device-provided name as the trace catalog takes it; `kind` as `sanitize_name`."""
     return zelos_sdk.sanitize_name(value.strip(), kind=kind).strip() if value.strip() else ""
+
+
+def describe_error(error: BaseException) -> str:
+    """One line for a log or an action result; pysoem's WkcError carries no text."""
+    if type(error).__name__ == "WkcError":
+        return (
+            f"no mailbox answer (working counter {getattr(error, 'wkc', None) or 0}): the slave "
+            "has no CoE mailbox, or is in INIT"
+        )
+    return f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
