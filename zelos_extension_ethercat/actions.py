@@ -83,8 +83,9 @@ def _run(what: str, call: Any) -> Any:
     except (ValueError, RuntimeError, TimeoutError):
         raise
     except Exception as e:
-        logger.exception("%s failed", what)
-        raise RuntimeError(f"{what} failed: {type(e).__name__}: {e}") from e
+        if type(e).__name__ != "WkcError":  # no answer: the message says it all
+            logger.exception("%s failed", what)
+        raise RuntimeError(f"{what} failed: {protocol.describe_error(e)}") from e
 
 
 # ─── Status and discovery ───────────────────────────────────────────────────

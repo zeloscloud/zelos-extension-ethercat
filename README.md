@@ -104,6 +104,7 @@ just install      # deps + pre-commit hooks
 just format       # ruff format + fix
 just check        # ruff lint + format check
 just test         # pytest
+just hil          # real segment, as root: ZELOS_ETHERCAT_IFACE=<nic> just hil (drives one output)
 just run          # run app mode locally
 just demo         # simulated segment
 just scan [IFACE] # interfaces, or the slaves on one

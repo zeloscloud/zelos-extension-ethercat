@@ -14,9 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Actions: `get_status`, `list_slaves`, `list_pdos`, `read_sdo`, `write_sdo`, `browse_od`, `write_output`, `clear_outputs`, `request_state`; config-form hooks `list_interfaces`, `auto_config`. Auto-configure scans only the interfaces the form's connections name and reports their slaves: a scan brings every slave on the NIC to INIT, so a segment another master runs there would drop out of OP. An interface a running connection owns is not scanned.
 - Zelos AI runs Get Status, List Slaves, List PDOs and Read SDO without asking first: they only read.
 - Outputs disabled by default: never written at start, zero on stop; `write_output` needs Enable Outputs on the connection and refuses a slave held below OP; `write_sdo` needs Enable Outputs too (an SDO can command a drive); reads stay ungated.
-- Recovery of slaves that fall out of OP or drop off the bus, after SOEM's simple_test. A recovered slave's outputs stay zero until written again (`outputs_cleared` on its `_state` event); `restore_outputs_after_recovery` drives the last written outputs again instead, as PLC masters do. A slave that answers but will not progress is reconfigured at most every 10 s, since the reconfig pauses process data for the segment; `reconfigs` counts the attempts on its `_state` event. SAFEOP+ERROR is acknowledged on every check pass, as SOEM and TwinCAT (Auto Restore States) do; `error_acks` counts them. A slave held below OP by `request_state` that drops out and is recovered is stepped back to its held state, never above it. With outputs enabled, each output slave gets a 500 ms process data watchdog at bring-up and again after every reconfig or recover, so its outputs drop if the master dies; a slave that rejects it has its outputs refused. 500 ms without a complete exchange (a stalled cycle) counts as a drop-out of every output slave, so outputs do not come back by themselves. Recovery warnings are once per slave per state, with a summary at most every 60 s. CoE emergency (EMCY) messages are logged per slave.
+- Recovery of slaves that fall out of OP or drop off the bus, after SOEM's simple_test. A recovered slave's outputs stay zero until written again (`outputs_cleared` on its `_state` event); `restore_outputs_after_recovery` drives the last written outputs again instead, as PLC masters do. A slave that answers but will not progress is reconfigured at most every 10 s, since the reconfig pauses process data for the segment; `reconfigs` counts the attempts on its `_state` event. SAFEOP+ERROR is acknowledged on every check pass, as SOEM and TwinCAT (Auto Restore States) do; `error_acks` counts them. A slave held below OP by `request_state` that drops out and is recovered is stepped back to its held state, never above it. With outputs enabled, each output slave gets a 500 ms process data watchdog at bring-up and again after every reconfig or recover, so its outputs drop if the master dies; a slave that rejects it, at bring-up or after a reconfig or recover, has its outputs zeroed and refused. 250 ms without a complete exchange (a stalled cycle, half the watchdog) counts as a drop-out of every output slave, zeroed before the next frame goes out, so outputs neither come back by themselves nor are driven again after the watchdog dropped them. Recovery warnings are once per slave per state, with a summary at most every 60 s. CoE emergency (EMCY) messages are logged per slave.
 - `demo`: a simulated EK1100 + EL1004 + 2x EL2004 + EL3004 segment; `scan` and `trace` CLI commands.
 - Bit-sized terminals sharing a byte are decoded and written at their FMMU start bit; one straddling a byte is reported (`input_problem` / `output_problem`), its inputs not logged and its outputs refused.
+- Hardware tests (`just hil`, root, `ZELOS_ETHERCAT_IFACE`): outputs at the pins, a stalled cycle, SAFEOP, stop and a killed master, each checked against the ESC's own registers over raw datagrams. They drive the first output of the first digital output terminal.
 - No GIL-holding SOEM waits on the cycle path: bring-up and `request_state` poll; `browse_od` only while held below OP; the forced exit past the 3 s shutdown bound.
 - Needs Zelos 26.0.10 or later.
 
@@ -25,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 *For maintainers: When releasing, move items from [Unreleased] to a new version section:*
 
 ```markdown
+
+### Fixed
+- `write_output` racing a `request_state` below OP could stage a value on the held slave that drove it on the return to OP without a new write; the hold is now checked under the output lock.
+- A `request_state` that times out is withdrawn if not yet started, and says it timed out.
+- A connection whose bring-up fails sends its slaves to INIT before closing.
+- Mailbox reads that get no answer (a slave without CoE, or in INIT) say so instead of an empty `WkcError`.
+
 ## [0.1.0] - 2026-01-01
 
 ### Added
